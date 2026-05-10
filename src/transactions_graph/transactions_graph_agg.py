@@ -49,6 +49,27 @@ class TransactionsGraphAgg:
                 time.sleep(retry_time)
                 current_retries += 1
 
-    # Start aggregator execution
-    def start():
+    # Process data message
+    def _process_data_batch(self):
         pass
+
+    # Process EOF
+    def _process_eof(self):
+        pass
+
+    # Process message that arrived
+    def process_message(self, message, ack, nack):
+        fields = message_protocol.internal.deserialize(message)
+
+        if len(fields) > 1:
+            self._process_data_batch(*fields)
+            ack()
+        elif len(fields) == 1:
+            self._process_eof(*fields)
+            ack()
+        else:
+            nack()
+
+    # Start aggregator execution
+    def start(self):
+        self.input_queue.start_consuming(self.process_message)
