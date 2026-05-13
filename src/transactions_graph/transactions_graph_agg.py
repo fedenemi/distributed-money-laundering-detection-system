@@ -7,15 +7,13 @@ from common import middleware, message_protocol, transaction_id
 from graph.graph_class import DirectedGraph
 from common.middleware.worker_base import WorkerBase
 
-# Environment variables
-OUTPUT_BATCH_EDGES = os.environ["OUTPUT_BATCH_EDGES"]
-
 # Constants
-TRANSACTION_ORIGIN_BANK_POS = 0
-TRANSACTION_ORIGIN_ACC_POS = 1
-TRANSACTION_DESTINATION_BANK_POS = 2
-TRANSACTION_DESTINATION_ACC_POS = 3
+TRANSACTION_ORIGIN_BANK_KEY = "From Bank"
+TRANSACTION_ORIGIN_ACC_KEY = "Account"
+TRANSACTION_DESTINATION_BANK_KEY = "To Bank"
+TRANSACTION_DESTINATION_ACC_KEY = "Account.1"
 
+NEW_DATA_EDGE_TAG_KEY = "Edge Type"
 EDGES_TAGS = ["i", "o"]
 
 class TransactionsGraphAgg(WorkerBase):
@@ -25,43 +23,52 @@ class TransactionsGraphAgg(WorkerBase):
         self.graph = DirectedGraph()
 
     # Process data message
-    def process(self, transactions_batch):
+    def process(self, transaction):
         logging.info("Batch de transacciones recibido")
-        # For each transaction on the batch
-        for transaction in transactions_batch:
-            # Get origin account
-            origin = transaction_id.TransactionID(
-                        transaction[TRANSACTION_ORIGIN_BANK_POS],
-                        transaction[TRANSACTION_ORIGIN_ACC_POS]
-                        )
-            
-            # Get destination account
-            destination = transaction_id.TransactionID(
-                        transaction[TRANSACTION_DESTINATION_BANK_POS],
-                        transaction[TRANSACTION_DESTINATION_ACC_POS]
-                        )
 
-            # Add nodes and edge
-            self.graph.add_node(origin)
-            self.graph.add_node(destination)
-            self.graph.add_edge(origin, destination)
+        # Get origin account
+        origin = transaction_id.TransactionID(
+                    transaction[TRANSACTION_ORIGIN_BANK_KEY],
+                    transaction[TRANSACTION_ORIGIN_ACC_KEY]
+                    )
+        
+        # Get destination account
+        destination = transaction_id.TransactionID(
+                    transaction[TRANSACTION_DESTINATION_BANK_KEY],
+                    transaction[TRANSACTION_DESTINATION_ACC_KEY]
+                    )
+
+        # Add nodes and edge
+        self.graph.add_node(origin)
+        self.graph.add_node(destination)
+        self.graph.add_edge(origin, destination)
         
         logging.info("Batch de transacciones procesado")
 
     # Process EOF
     def on_eof(self):
         logging.info("EOF recibido")
-        # New batch
-        transactions_batch = []
 
         # For each node
         for origin in self.graph.get_nodes():
+            # Get origin ID elements
+            origin_bank, origin_acc = origin.as_tuple()
 
             # For each neighbour
             for destination in self.graph.get_neighbors(origin):
+                # Get destination ID elements
+                destination_bank, destination_acc = destination.as_tuple()
 
                 # For each tag to send
                 for tag in EDGES_TAGS:
-                    yield (origin, destination, tag)
+
+                    # Generate new data edge
+                    yield {
+                        TRANSACTION_ORIGIN_BANK_KEY : origin_bank,
+                        TRANSACTION_ORIGIN_ACC_KEY : origin_acc,
+                        TRANSACTION_DESTINATION_BANK_KEY : destination_bank,
+                        TRANSACTION_DESTINATION_ACC_KEY : destination_acc,
+                        NEW_DATA_EDGE_TAG_KEY : tag
+                        }
 
         logging.info("EOF procesado: datos enviados")
