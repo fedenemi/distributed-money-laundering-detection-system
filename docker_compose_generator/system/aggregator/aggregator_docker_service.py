@@ -48,7 +48,8 @@ def get_aggregator_docker_services(service_prefix, total_instances,
         new_service_config = copy.deepcopy(base_aggregator_service)
 
         # Add container name
-        new_service_config[CONTAINER_NAME_TAG] = f"{service_prefix}_{i}"
+        new_service_name = f"{service_prefix}_{i}"
+        new_service_config[CONTAINER_NAME_TAG] = new_service_name
 
         # Add context folder
         new_service_config[DOCKER_BUILD_SECTION_NAME][DOCKER_BUILD_CONTEXT_SUBSECTION_NAME] = CONTEXT_FOLDER
@@ -77,7 +78,6 @@ def get_aggregator_docker_services(service_prefix, total_instances,
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{OUTPUT_TAG_TAG}={output_tag}")
 
         # Add service in services dictionary
-        new_service_name = f"{service_prefix}_{i}"
         aggregator_services[new_service_name] = new_service_config
 
     return aggregator_services

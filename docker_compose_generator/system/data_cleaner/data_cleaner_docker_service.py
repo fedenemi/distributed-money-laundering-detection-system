@@ -36,7 +36,8 @@ def get_data_cleaner_docker_services(service_prefix, total_instances,
         new_service_config = copy.deepcopy(base_data_cleaner_service)
 
         # Add container name
-        new_service_config[CONTAINER_NAME_TAG] = f"{service_prefix}_{i}"
+        new_service_name = f"{service_prefix}_{i}"
+        new_service_config[CONTAINER_NAME_TAG] = new_service_name
 
         # Add context folder
         new_service_config[DOCKER_BUILD_SECTION_NAME][DOCKER_BUILD_CONTEXT_SUBSECTION_NAME] = CONTEXT_FOLDER
@@ -54,7 +55,6 @@ def get_data_cleaner_docker_services(service_prefix, total_instances,
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{OUTPUT_EXCHANGE_TAG}={output_exchange}")
 
         # Add service in services dictionary
-        new_service_name = f"{service_prefix}_{i}"
         data_cleaner_services[new_service_name] = new_service_config
 
     return data_cleaner_services

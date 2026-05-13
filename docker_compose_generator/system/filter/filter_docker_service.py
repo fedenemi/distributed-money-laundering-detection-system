@@ -44,7 +44,8 @@ def get_filter_docker_services(service_prefix, total_instances, filter_field,
         new_service_config = copy.deepcopy(base_filter_service)
 
         # Add container name
-        new_service_config[CONTAINER_NAME_TAG] = f"{service_prefix}_{i}"
+        new_service_name = f"{service_prefix}_{i}"
+        new_service_config[CONTAINER_NAME_TAG] = new_service_name
 
         # Add context folder
         new_service_config[DOCKER_BUILD_SECTION_NAME][DOCKER_BUILD_CONTEXT_SUBSECTION_NAME] = CONTEXT_FOLDER
@@ -67,7 +68,6 @@ def get_filter_docker_services(service_prefix, total_instances, filter_field,
         new_service_config[DOCKER_ENV_VARS_NAME].append(f"{FILTER_VALUE_TAG}={filter_value}")
 
         # Add service in services dictionary
-        new_service_name = f"{service_prefix}_{i}"
         filter_services[new_service_name] = new_service_config
 
     return filter_services
