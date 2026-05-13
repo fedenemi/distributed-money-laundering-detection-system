@@ -24,9 +24,8 @@ Ejemplos:
 import logging
 import os
 import sys
-sys.path.insert(0, "/app")
 
-from middleware.worker_base import WorkerBase #TODO: habría que implementar un WorkerBase. La idea supongo que es desacoplar la lógica del worker del manejo de mensajes de Rabbitmq.
+from middleware.worker_base import WorkerBase
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -35,7 +34,7 @@ logger = logging.getLogger(__name__)
 class Aggregator(WorkerBase):
 
     def __init__(self):
-        super().__init__() # TODO: implementar un WorkerBase
+        super().__init__()
         self.op           = os.environ["AGG_OP"]
         self.agg_field    = os.environ.get("AGG_FIELD", "")
         self.key_field    = os.environ.get("KEY_FIELD", "")
@@ -77,9 +76,8 @@ class Aggregator(WorkerBase):
 
         return []
 
-    def on_eof(self) -> list:
-        results = []
-
+    def on_eof(self):
+        count = 0
         for k, acc in self._state.items():
             result = {}
             if self.key_field:
@@ -103,11 +101,11 @@ class Aggregator(WorkerBase):
             if self.output_tag:
                 result["source"] = self.output_tag
 
-            results.append(result)
+            count += 1
+            yield result
 
-        logger.info(f"Aggregator {self.op}: {len(results)} claves emitidas")
-        return results
+        logger.info(f"Aggregator {self.op}: {count} claves emitidas")
 
 
 if __name__ == "__main__":
-    Aggregator().run() #TODO
+    Aggregator().run()
