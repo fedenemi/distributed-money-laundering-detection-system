@@ -99,9 +99,9 @@ class WorkerBase:
     def on_eof(self) -> list:
         return []
 
-    def shard_key_for(self, msg: dict) -> str:
-        """Clave de sharding para el mensaje de salida."""
-        return ""
+    def _routing_key(self, msg: dict) -> str:
+        """Clave de particion del mensaje. Override en Splitter."""
+        return "__queue__"
 
     # --- Emisión con Buffer y flush --------------------------------------------------------
 
@@ -109,11 +109,7 @@ class WorkerBase:
         if not results or self._producer is None:
             return
         for msg in results:
-            if self.output_exchange and self.output_shards > 1:
-                shard = hash(self.shard_key_for(msg)) % self.output_shards
-                buf_key = str(shard)
-            else:
-                buf_key = "__queue__"
+            buf_key = self._routing_key(msg)
             self._buffer.setdefault(buf_key, []).append(msg)
             if len(self._buffer[buf_key]) >= self.batch_size:
                 self._flush_key(buf_key)
@@ -154,7 +150,8 @@ class WorkerBase:
                     eof_count[0] += 1
                     ack()
                     if eof_count[0] >= self.n_upstream:
-                        self._emit(self.on_eof())
+                        for result in self.on_eof():
+                            self._emit([result])
                         self._flush_all()
                         self._send_eof()
                         self._consumer.stop_consuming()

@@ -1,9 +1,17 @@
 class DirectedGraph:
     
+    # Creator
     def __init__(self):
         self.nodes = set()
         self.adjecencies = {}
-    
+
+    def __del__(self):
+        for v in self.nodes:
+            self.delete_node(v)
+        
+        del self.adjecencies
+        del self.nodes
+
     # Add node to graph
     def add_node(self, v):
         self.nodes.add(v)
@@ -16,8 +24,7 @@ class DirectedGraph:
 
         # Delete connections from other nodes
         for w in self.nodes:
-            if v in self.adjecencies[w]:
-                del self.adjecencies[w].remove(v)
+            self.delete_edge(w, v)
 
     # Lazily gets the graph's nodes
     def get_nodes(self):
@@ -27,7 +34,7 @@ class DirectedGraph:
     # Delete edge from graph
     def delete_edge(self, v, w):
         if self.are_connected(v, w):
-            del self.adjecencies[v][w]
+            self.adjecencies[w].remove(v)
 
     # Adds edge between nodes
     def add_edge(self, v, w):
