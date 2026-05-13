@@ -13,6 +13,7 @@ def generate_docker_compose_file(total_clients):
 
     # Create clients
     if total_clients > 0:
+        raise Exception("TODO: Clients services creation")
         clients_services = get_clients_docker_services("", "", total_clients=total_clients)
         docker_file = docker_file | clients_services
 
