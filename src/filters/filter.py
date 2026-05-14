@@ -2,15 +2,17 @@
 FilterWorker: filtra filas según una condición configurable por variables de entorno.
 
 Recibe filas en formato dict y decide si reenviarlas o descartarlas según:
-  - FILTER_FIELD: índice (sobre list(data.values())) o clave del dict a evaluar
+  - FILTER_FIELD: clave del dict a evaluar
   - FILTER_OP   : operador (eq, neq, lt, le, gt, ge, contains, startswith, endswith, in)
   - FILTER_VALUE: valor de comparación (número, fecha 'YYYY/MM/DD HH:MM'|'YYYY/MM/DD', o JSON list)
-
+  - DROP_FILTER_FIELD: indica si se dropea la clave evaluada de la data transmitida. Solo acepta ("True", "False").
+  
 Comportamiento:
   - Stateless: escala libremente.
   - Si falta el campo objetivo lanza KeyError/IndexError/TypeError (WorkerBase decide nack/retry).
-  - Si FILTER_VALUE es un intervalo de fechas, requiere FILTER_OP == "in".
+  - Si FILTER_VALUE es un intervalo de fechas o un conjunto de valores, requiere FILTER_OP == "in".
 """
+
 import os
 import logging
 import datetime
@@ -25,6 +27,7 @@ logger = logging.getLogger(__name__)
 FILTER_FIELD = os.environ["FILTER_FIELD"]
 FILTER_OP = os.environ.get("FILTER_OP", "eq").lower()
 FILTER_VALUE = os.environ["FILTER_VALUE"]
+DROP_FILTER_FIELD = os.environ.get("DROP_FILTER_FIELD", "false")
 
 
 def _parse_filter_value(raw: str) -> Tuple[Any, Optional[Set[str]], bool, Optional[datetime.date], Optional[datetime.date]]:
@@ -41,7 +44,6 @@ def _parse_filter_value(raw: str) -> Tuple[Any, Optional[Set[str]], bool, Option
     """
     # defaults
     value_set = None
-    is_date_range = False
     date_start = date_end = None
 
     # try numeric
@@ -69,7 +71,6 @@ def _parse_filter_value(raw: str) -> Tuple[Any, Optional[Set[str]], bool, Option
                     date_start, date_end = d0, d1
                 else:
                     date_start, date_end = d1, d0
-                is_date_range = True
                 return ( (date_start, date_end), None, True, date_start, date_end )
         # fallback to value set
         value_set = set(parsed)
@@ -84,22 +85,13 @@ def _parse_filter_value(raw: str) -> Tuple[Any, Optional[Set[str]], bool, Option
     return raw, None, False, None, None
 
 
-def _extract_target(data: dict, field_index: Optional[int], field_key: Optional[str]) -> Any:
-    """Extract target value from dict by index (values order) or by key.
-    Raises TypeError/IndexError/KeyError on missing/unexpected input.
+def _extract_target(data: dict, field_key: Optional[str]) -> Any:
+    """Extract target value from dict by key only.
+    Raises TypeError/KeyError/RuntimeError on missing/unexpected input.
     """
-    if field_index is None and field_key is None:
-        raise RuntimeError("No FILTER_FIELD configurado (ni index ni key)")
+    if field_key is None:
+        raise RuntimeError("FILTER_FIELD debe ser una clave (string)")
 
-    if field_index is not None:
-        if not isinstance(data, dict):
-            raise TypeError("Se esperaba dict cuando FILTER_FIELD es un índice")
-        vals = list(data.values())
-        if not (0 <= field_index < len(vals)):
-            raise IndexError(f"Índice {field_index} fuera de rango (len={len(vals)})")
-        return vals[field_index]
-
-    # field_key is not None
     if not isinstance(data, dict):
         raise TypeError("Se esperaba dict cuando FILTER_FIELD es una clave")
     if field_key not in data:
@@ -125,13 +117,11 @@ def _target_in_value_set(target: Any, value_set: Set[Any]) -> bool:
 class FilterWorker(WorkerBase):
 
     def __init__(self):
-        # parse filter field (index or key)
-        self.filter_field_index = None
-        self.filter_field_key = None
-        try:
-            self.filter_field_index = int(FILTER_FIELD)
-        except Exception:
-            self.filter_field_key = FILTER_FIELD
+        # parse filter field (key)
+        self.filter_field_key = FILTER_FIELD
+
+        # whether to drop the filter field from the row when forwarding
+        self.drop_filter_field = str(DROP_FILTER_FIELD).strip().lower() == "true"
 
         # parse FILTER_VALUE into structured form
         (self.filter_value,
@@ -165,23 +155,35 @@ class FilterWorker(WorkerBase):
         super().__init__()
 
 
+    def _maybe_drop_field(self, data: dict):
+        """Drop the configured filter field from data in-place if enabled."""
+        if not self.drop_filter_field:
+            return
+        try:
+            data.pop(self.filter_field_key, None)
+        except Exception:
+            logger.exception("Error al dropear el campo de filtro")
+
+
     def process(self, data: dict):
         """Recibe fila dict. Devuelve [data] si cumple, [] si no. Lanza errores para WorkerBase."""
-        target = _extract_target(data, self.filter_field_index, self.filter_field_key)
+        target = _extract_target(data, self.filter_field_key)
 
         # date-range matching (requires FILTER_OP == 'in' by init check)
         if self._is_date_range:
             if _target_matches_date_range(target, self._date_start, self._date_end):
+                self._maybe_drop_field(data)
                 return [data]
             return []
 
         # explicit value set membership
         if self._value_set is not None:
             if _target_in_value_set(target, self._value_set):
+                self._maybe_drop_field(data)
                 return [data]
             return []
 
-        # regular comparison -> attempt simple casts for numeric/date if filter_value type suggests it
+        # regular comparison
         target_cast = target
         try:
             if isinstance(self.filter_value, int):
@@ -197,6 +199,7 @@ class FilterWorker(WorkerBase):
 
         try:
             if self.op_func(target_cast, self.filter_value):
+                self._maybe_drop_field(data)
                 return [data]
             return []
         except Exception:
