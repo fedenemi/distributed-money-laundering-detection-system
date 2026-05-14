@@ -3,27 +3,123 @@ FilterWorker: filtra filas según una condición configurable por variables de e
 
 Recibe filas en formato dict y decide si reenviarlas o descartarlas según:
   - FILTER_FIELD: índice (sobre list(data.values())) o clave del dict a evaluar
-  - FILTER_OP   : operador (eq, neq, lt, le, gt, ge, contains, startswith, endswith)
-  - FILTER_VALUE: valor de comparación (número o fecha en formato 'YYYY/MM/DD HH:MM' o 'YYYY/MM/DD')
+  - FILTER_OP   : operador (eq, neq, lt, le, gt, ge, contains, startswith, endswith, in)
+  - FILTER_VALUE: valor de comparación (número, fecha 'YYYY/MM/DD HH:MM'|'YYYY/MM/DD', o JSON list)
 
 Comportamiento:
   - Stateless: escala libremente.
   - Si falta el campo objetivo lanza KeyError/IndexError/TypeError (WorkerBase decide nack/retry).
-  - Si FILTER_VALUE es fecha se compara por día (se usa common.utils.dates.parse_date).
+  - Si FILTER_VALUE es un intervalo de fechas, requiere FILTER_OP == "in".
 """
-
-
 import os
 import logging
 import datetime
+import json
+from typing import Any, Optional, Set, Tuple
 
 from common.middleware.worker_base import WorkerBase
 from common.utils.dates import parse_date
 
+logger = logging.getLogger(__name__)
 
-FILTER_FIELD = os.environ["FILTER_FIELD"]        # either an int index (e.g. "2") or a dict key name (e.g. "country")
-FILTER_OP = os.environ.get("FILTER_OP", "eq")    # eq, neq, lt, le, gt, ge, contains, startswith, endswith
-FILTER_VALUE = os.environ["FILTER_VALUE"]        # comparison value (string/number)
+FILTER_FIELD = os.environ["FILTER_FIELD"]
+FILTER_OP = os.environ.get("FILTER_OP", "eq").lower()
+FILTER_VALUE = os.environ["FILTER_VALUE"]
+
+
+def _parse_filter_value(raw: str) -> Tuple[Any, Optional[Set[str]], bool, Optional[datetime.date], Optional[datetime.date]]:
+    """
+    Parse FILTER_VALUE raw string.
+    Returns (filter_value, value_set, is_date_range, date_start, date_end).
+
+    - If numeric -> filter_value = int/float
+    - If JSON list:
+        * length 2 and both parseable as dates -> is_date_range True and date_start/date_end set
+        * otherwise -> value_set is set(parsed)
+    - Else try single date -> filter_value = datetime.date
+    - Else -> filter_value = raw string
+    """
+    # defaults
+    value_set = None
+    is_date_range = False
+    date_start = date_end = None
+
+    # try numeric
+    try:
+        if "." in raw:
+            return float(raw), None, False, None, None
+        return int(raw), None, False, None, None
+    except Exception:
+        pass
+
+    # try JSON list
+    parsed = None
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        parsed = None
+
+    if isinstance(parsed, list):
+        if len(parsed) == 2:
+            d0 = parse_date(parsed[0])
+            d1 = parse_date(parsed[1])
+            if isinstance(d0, datetime.date) and isinstance(d1, datetime.date):
+                # normalize
+                if d0 <= d1:
+                    date_start, date_end = d0, d1
+                else:
+                    date_start, date_end = d1, d0
+                is_date_range = True
+                return ( (date_start, date_end), None, True, date_start, date_end )
+        # fallback to value set
+        value_set = set(parsed)
+        return parsed, value_set, False, None, None
+
+    # try single date
+    d = parse_date(raw)
+    if isinstance(d, datetime.date):
+        return d, None, False, None, None
+
+    # fallback plain string
+    return raw, None, False, None, None
+
+
+def _extract_target(data: dict, field_index: Optional[int], field_key: Optional[str]) -> Any:
+    """Extract target value from dict by index (values order) or by key.
+    Raises TypeError/IndexError/KeyError on missing/unexpected input.
+    """
+    if field_index is None and field_key is None:
+        raise RuntimeError("No FILTER_FIELD configurado (ni index ni key)")
+
+    if field_index is not None:
+        if not isinstance(data, dict):
+            raise TypeError("Se esperaba dict cuando FILTER_FIELD es un índice")
+        vals = list(data.values())
+        if not (0 <= field_index < len(vals)):
+            raise IndexError(f"Índice {field_index} fuera de rango (len={len(vals)})")
+        return vals[field_index]
+
+    # field_key is not None
+    if not isinstance(data, dict):
+        raise TypeError("Se esperaba dict cuando FILTER_FIELD es una clave")
+    if field_key not in data:
+        raise KeyError(f"Clave '{field_key}' no encontrada en la fila")
+    return data[field_key]
+
+
+def _target_matches_date_range(target: Any, start: datetime.date, end: datetime.date) -> bool:
+    tdate = parse_date(target)
+    if not isinstance(tdate, datetime.date):
+        return False
+    return start <= tdate <= end
+
+
+def _target_in_value_set(target: Any, value_set: Set[Any]) -> bool:
+    if target in value_set:
+        return True
+    # fallback string comparison
+    target_s = str(target)
+    return any(target_s == str(v) for v in value_set)
 
 
 class FilterWorker(WorkerBase):
@@ -36,22 +132,24 @@ class FilterWorker(WorkerBase):
             self.filter_field_index = int(FILTER_FIELD)
         except Exception:
             self.filter_field_key = FILTER_FIELD
-        
-        # parse filter value: int/float -> datetime (ISO) -> string
-        try:
-            if "." in FILTER_VALUE:
-                self.filter_value = float(FILTER_VALUE)
-            else:
-                self.filter_value = int(FILTER_VALUE)
-        except Exception:
-            d = parse_date(FILTER_VALUE)
-            if isinstance(d, datetime.date):
-                self.filter_value = d
-            else:
-                self.filter_value = FILTER_VALUE
-        
-        # operator mapping
-        ops = {
+
+        # parse FILTER_VALUE into structured form
+        (self.filter_value,
+         self._value_set,
+         self._is_date_range,
+         self._date_start,
+         self._date_end) = _parse_filter_value(FILTER_VALUE)
+
+        # if date range was provided, require operator "in"
+        if self._is_date_range and FILTER_OP != "in":
+            raise ValueError("FILTER_VALUE es un intervalo de fechas: use FILTER_OP='in' para habilitar el filtrado por rango")
+
+        # if value set was provided, require operator "in"
+        if self._value_set is not None and FILTER_OP != "in":
+            raise ValueError("FILTER_VALUE es un conjunto de valores: use FILTER_OP='in' para habilitar el filtrado por pertenencia")
+
+        # operator mapping (regular comparisons)
+        self._ops = {
             "eq": lambda a, b: a == b,
             "neq": lambda a, b: a != b,
             "lt": lambda a, b: a < b,
@@ -62,38 +160,29 @@ class FilterWorker(WorkerBase):
             "startswith": lambda a, b: str(a).startswith(str(b)),
             "endswith": lambda a, b: str(a).endswith(str(b)),
         }
-        
-        self.op = ops.get(FILTER_OP.lower(), ops["eq"])
+        self.op_func = self._ops.get(FILTER_OP, self._ops["eq"])
 
         super().__init__()
 
 
     def process(self, data: dict):
-        """Receives a row as dict. Returns [data] if it passes the filter, [] if not."""
-        
-        target = None
+        """Recibe fila dict. Devuelve [data] si cumple, [] si no. Lanza errores para WorkerBase."""
+        target = _extract_target(data, self.filter_field_index, self.filter_field_key)
 
-        if self.filter_field_index is None and self.filter_field_key is None:
-            raise RuntimeError("No FILTER_FIELD configurado (ni index ni key)")
+        # date-range matching (requires FILTER_OP == 'in' by init check)
+        if self._is_date_range:
+            if _target_matches_date_range(target, self._date_start, self._date_end):
+                return [data]
+            return []
 
-        # detect target to evaluate by index
-        if self.filter_field_index is not None:
-            idx = self.filter_field_index
-            if isinstance(data, dict):
-                vals = list(data.values())
-                if 0 <= idx < len(vals):
-                    target = vals[idx]
+        # explicit value set membership
+        if self._value_set is not None:
+            if _target_in_value_set(target, self._value_set):
+                return [data]
+            return []
 
-        # detect target to evaluate by key
-        elif self.filter_field_key is not None:
-            key = self.filter_field_key
-            if isinstance(data, dict):
-                target = data.get(key)
-        
-        if not target:
-            raise RuntimeError("Target to evaluate was not found.")
-
-        # cast target to filter_value type
+        # regular comparison -> attempt simple casts for numeric/date if filter_value type suggests it
+        target_cast = target
         try:
             if isinstance(self.filter_value, int):
                 target_cast = int(target)
@@ -101,21 +190,19 @@ class FilterWorker(WorkerBase):
                 target_cast = float(target)
             elif isinstance(self.filter_value, datetime.date):
                 dt = parse_date(target)
-                target_cast = dt if isinstance(dt, datetime.date) else target
-            else:
-                target_cast = target
+                if isinstance(dt, datetime.date):
+                    target_cast = dt
         except Exception:
             target_cast = target
 
         try:
-            if self.op(target_cast, self.filter_value):
+            if self.op_func(target_cast, self.filter_value):
                 return [data]
             return []
         except Exception:
-            logging.exception("Error evaluating filter")
+            logger.exception("Error evaluating filter")
             return []
 
 
     def on_eof(self):
-        # no produce filas extra; WorkerBase propagará EOF según su política
         return []
