@@ -1,5 +1,5 @@
 from aggregator.aggregator_docker_service import get_aggregator_docker_services
-from data_reducer.data_reducer_docker_service import get_data_cleaner_docker_services
+from data_reducer.data_reducer_docker_service import get_data_reducer_docker_services
 from filter.filter_docker_service import get_filters_docker_services
 from gateway.gateway_docker_service import get_gateway_docker_services
 from scatter_gather.scatter_gather_generators import get_scatter_gather_services
@@ -29,7 +29,7 @@ def generate_system_docker_compose():
 
     # Query 1
     ## Reduce data
-    data_reducers_q1 = get_data_cleaner_docker_services("q1_data_reducer", 1,
+    data_reducers_q1 = get_data_reducer_docker_services("q1_data_reducer", 1,
                                                         ["From Bank", "Account", "To Bank", "Account.1", "Amount Paid"],
                                                         input_exchange="usd_transactions_exc",
                                                         output_queue="q1_reduced_data",
@@ -46,7 +46,7 @@ def generate_system_docker_compose():
 
     # Query 2
     ## Reduce data
-    data_reducers_q2 = get_data_cleaner_docker_services("q2_data_reducer", 1,
+    data_reducers_q2 = get_data_reducer_docker_services("q2_data_reducer", 1,
                                                         ["From Bank", "Account", "Amount Paid"],
                                                         input_exchange="usd_transactions_exc",
                                                         output_queue="q2_reduced_data",
@@ -65,7 +65,7 @@ def generate_system_docker_compose():
     q2_max_aggregators = get_aggregator_docker_services("q2_max_by_bank", 1,
                                                         input_exchange="q2_split_by_bank_exc",
                                                         output_queue="results_2",
-                                                        agg_op="max", agg_field="From Bank",
+                                                        agg_op="max", agg_field="Amount Paid", key_field="From Bank",
                                                         carry_fields=["From Bank", "Account", "Amount Paid"],
                                                         )
     system = system | q2_max_aggregators
@@ -73,7 +73,7 @@ def generate_system_docker_compose():
 
     # Query 3
     ## Reduce data
-    data_reducers_q3 = get_data_cleaner_docker_services("q3_data_reducer", 1,
+    data_reducers_q3 = get_data_reducer_docker_services("q3_data_reducer", 1,
                                                         ["Timestamp", "From Bank", "Account", "Amount Paid", "Payment Format"],
                                                         input_exchange="usd_transactions_exc",
                                                         output_exchange="q3_reduced_data_exc",
@@ -99,8 +99,7 @@ def generate_system_docker_compose():
     q3_avg_aggregators = get_aggregator_docker_services("q3_avg_aggregators_preceding_period", 1,
                                                         input_exchange="q3_split_by_payment_method_exc",
                                                         output_queue="q3_avg_preceding_period",
-                                                        agg_op="eq", agg_field="Payment Method",
-                                                        carry_fields=["From Bank"],
+                                                        agg_op="avg", agg_field="Amount Paid", key_field="Payment Format",
                                                         )
     system = system | q3_avg_aggregators
 
@@ -110,7 +109,7 @@ def generate_system_docker_compose():
 
     # Query 4
     ## Reduce data
-    data_reducers_q4 = get_data_cleaner_docker_services("q4_data_reducer", 1,
+    data_reducers_q4 = get_data_reducer_docker_services("q4_data_reducer", 1,
                                                         ["Timestamp", "From Bank", "Account", "To Bank", "Account.1"],
                                                         input_exchange="usd_transactions_exc",
                                                         output_exchange="q4_reduced_data_exc",
@@ -165,7 +164,7 @@ def generate_system_docker_compose():
 
     # Query 5
     ## Data reducers
-    data_reducers_q5 = get_data_cleaner_docker_services("q5_data_reducer", 1,
+    data_reducers_q5 = get_data_reducer_docker_services("q5_data_reducer", 1,
                                                         ["Timestamp", "From Bank", "Account", "To Bank", "Account.1", "Amount Paid"],
                                                         input_queue="cleaned_data",
                                                         output_queue="q5_reduced_data",
