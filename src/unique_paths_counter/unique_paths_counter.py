@@ -22,6 +22,7 @@ TOTAL_PATHS_KEY = "Total Paths"
 class UniquePathsCounter(WorkerBase):
 
     def __init__(self):
+        super().__init__()
         # Create storage for intermediate nodes
         self.intermediate_nodes = {}
 

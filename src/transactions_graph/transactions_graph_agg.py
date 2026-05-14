@@ -19,6 +19,7 @@ EDGES_TAGS = ["i", "o"]
 class TransactionsGraphAgg(WorkerBase):
 
     def __init__(self):
+        super().__init__()
         # Create graph
         self.graph = DirectedGraph()
 

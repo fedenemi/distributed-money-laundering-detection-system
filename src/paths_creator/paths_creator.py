@@ -19,6 +19,7 @@ TRANSACTION_INTERMEDIATE_ACC_KEY = "Interm Acc"
 class PathsCreator(WorkerBase):
 
     def __init__(self):
+        super().__init__()
         # Create storage for edges of nodes
         self.incoming_edges = {}
         self.outgoing_edges = {}
