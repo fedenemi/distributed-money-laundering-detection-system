@@ -15,9 +15,6 @@ def generate_system_docker_compose():
                 )
     system = system | gateway
 
-    # Create data cleaners
-    raise Exception("TODO: Faltan los data cleaners")
-
     # Create data
     usd_filters = get_filters_docker_services("usd_filter", 1,
                                              "Payment Currency", "US Dollar", "eq",
@@ -43,7 +40,7 @@ def generate_system_docker_compose():
                                                     output_queue="results_1",
                                                     )
 
-
+    return system
     # Query 2
     ## Reduce data
     data_reducers_q2 = get_data_reducer_docker_services("q2_data_reducer", 1,
