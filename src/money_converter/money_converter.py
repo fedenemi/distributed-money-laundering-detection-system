@@ -1,4 +1,8 @@
+import os
+
 from common.middleware.worker_base import WorkerBase
+
+TARGET_CURRENCY_TAG = "TARGET_CURRENCY"
 
 class MoneyConverter(WorkerBase):
 
@@ -6,6 +10,7 @@ class MoneyConverter(WorkerBase):
         super().__init__()
 
         # Get environment variables
+        self._target_currency = os.environ[TARGET_CURRENCY_TAG]
 
         # Currency rates
         self._currency_rates_by_date = {}
