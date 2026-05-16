@@ -1,0 +1,9 @@
+build:
+  context: ./src/unique_paths_counter
+  dockerfile: Dockerfile
+depends_on:
+  rabbitmq:
+    condition: service_healthy
+environment:
+- MOM_HOST=rabbitmq
+- PYTHONUNBUFFERED=1

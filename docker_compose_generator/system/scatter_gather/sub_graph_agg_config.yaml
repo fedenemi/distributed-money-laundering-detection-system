@@ -1,0 +1,9 @@
+build:
+  context: ./src/transactions_graph
+  dockerfile: Dockerfile
+depends_on:
+  rabbitmq:
+    condition: service_healthy
+environment:
+- MOM_HOST=rabbitmq
+- PYTHONUNBUFFERED=1

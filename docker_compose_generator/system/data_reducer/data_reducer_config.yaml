@@ -1,0 +1,5 @@
+build:
+  dockerfile: Dockerfile
+environment:
+- RABBITMQ_HOST=rabbitmq
+- N_UPSTREAM=1

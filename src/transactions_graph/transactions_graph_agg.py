@@ -72,3 +72,11 @@ class TransactionsGraphAgg(WorkerBase):
                         }
 
         logging.info("EOF procesado: datos enviados")
+
+    def _routing_key(self, msg: dict) -> str:
+        """Clave de particion del mensaje."""
+        if msg[NEW_DATA_EDGE_TAG_KEY] == "i":
+            routing_key = f"{msg[TRANSACTION_DESTINATION_BANK_KEY]}{msg[TRANSACTION_DESTINATION_ACC_KEY]}"
+        else:
+            routing_key = f"{msg[TRANSACTION_ORIGIN_BANK_KEY]}{msg[TRANSACTION_ORIGIN_ACC_KEY]}"
+        return routing_key

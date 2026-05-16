@@ -1,0 +1,6 @@
+build:
+  context: ./src/
+  dockerfile: aggregation/Dockerfile
+environment:
+- MOM_HOST=rabbitmq
+- PYTHONUNBUFFERED=1

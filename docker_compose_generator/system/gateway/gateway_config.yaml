@@ -1,0 +1,12 @@
+build:
+  context: ./src/gateway
+  dockerfile: Dockerfile
+container_name: gateway
+depends_on:
+  rabbitmq:
+    condition: service_healthy
+environment:
+- MOM_HOST=rabbitmq
+- PYTHONUNBUFFERED=1
+- SERVER_HOST=gateway
+- SERVER_PORT=7659
