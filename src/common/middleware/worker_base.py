@@ -97,7 +97,7 @@ class WorkerBase:
     def process(self, data: dict) -> list:
         raise NotImplementedError
 
-    def on_eof(self) -> list:
+    def on_eof(self, client_id=None) -> list:
         return []
 
     def _routing_key(self, msg: dict) -> str:
@@ -167,7 +167,7 @@ class WorkerBase:
                         eof_count[0] += 1
                         ack()
                         if eof_count[0] >= self.n_upstream:
-                            for result in self.on_eof():
+                            for result in self.on_eof(None):
                                 self._emit([result])
                             self._flush_all()
                             self._send_eof()
@@ -178,7 +178,7 @@ class WorkerBase:
                     eof_per_client[client_id] = eof_per_client.get(client_id, 0) + 1
                     ack()
                     if eof_per_client[client_id] >= self.n_upstream and client_id not in done_clients:
-                        for result in self.on_eof():
+                        for result in self.on_eof(client_id):
                             self._emit([result])
                         self._flush_all()
                         self._send_eof(client_id)

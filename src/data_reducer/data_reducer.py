@@ -54,5 +54,5 @@ class DataReducer(WorkerBase):
         logger.info(f"Reducing data {data} to {reduced}")
         return [reduced]
 
-    def on_eof(self):
+    def on_eof(self, client_id=None):
         return []

@@ -222,5 +222,5 @@ class FilterWorker(WorkerBase):
             return []
 
 
-    def on_eof(self):
+    def on_eof(self, client_id=None):
         return []

@@ -54,7 +54,7 @@ class PathsCreator(WorkerBase):
         logging.info("Batch de datos procesado")
 
     # Process EOF
-    def on_eof(self):
+    def on_eof(self, client_id=None):
         logging.info("EOF recibido")
 
         # For each node with incoming edges
