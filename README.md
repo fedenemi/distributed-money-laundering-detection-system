@@ -35,11 +35,25 @@ El script [scripts/reduce_dataset.py](scripts/reduce_dataset.py) permite reducir
 Uso:
 
 ```bash
-python scripts/reduce_dataset.py --input `datasets/transactions_full.csv` --output datasets/transactions_reduced.csv --size 100000
+python scripts/reduce_dataset.py --input datasets/transactions_full.csv --output datasets/transactions_reduced.csv --size 100000
 ```
 
 Opcionalmente, podes fijar una semilla para resultados reproducibles:
 
 ```bash
 python scripts/reduce_dataset.py --input datasets/transactions_full.csv --output datasets/transactions_reduced.csv --size 100000 --seed 123
+```
+
+## Resultados
+
+Los resultados de cada cliente se escriben como CSV en:
+
+```
+results/client_{id}/results_q{n}.csv
+```
+
+Ejemplo:
+
+```
+results/client_0/results_q1.csv
 ```
