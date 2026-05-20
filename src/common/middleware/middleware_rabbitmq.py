@@ -71,7 +71,7 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
             self.connection = pika.BlockingConnection(pika.ConnectionParameters(host=host))
             self.channel = self.connection.channel()
 
-            self.channel.exchange_declare(exchange=exchange_name, exchange_type='direct')
+            self.channel.exchange_declare(exchange=exchange_name, exchange_type='direct', durable=True)
             self.exchange_name = exchange_name
 
             result = self.channel.queue_declare(queue='', exclusive=True)

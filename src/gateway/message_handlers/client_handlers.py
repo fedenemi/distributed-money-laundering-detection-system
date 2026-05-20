@@ -1,17 +1,9 @@
 import logging
+import traceback
 import socket
 
 from message_handlers import message_handler
 from common import middleware, message_protocol
-
-
-def _expect_client_ack(client_socket, client_id):
-    msg_type, payload = message_protocol.external.recv_msg(client_socket)
-    if msg_type != message_protocol.external.MsgType.ACK:
-        raise TypeError(f"Expected ACK, got {msg_type}")
-    if payload != client_id:
-        raise ValueError("Client id mismatch in ACK")
-
 
 def _update_bank_map(bank_maps, client_id, rows):
     bank_map = dict(bank_maps.get(client_id, {}))
@@ -27,9 +19,7 @@ def _rows_to_transactions(client_id, rows, transaction_columns):
     transactions = []
     for row in rows:
         if len(row) != len(transaction_columns):
-            logging.warning(
-                "Transaction row has unexpected length %s", len(row)
-            )
+            logging.warning("Transaction row has unexpected length %s", len(row))
             continue
         transaction = dict(zip(transaction_columns, row))
         transaction["client_id"] = client_id
@@ -57,14 +47,22 @@ def handle_client_request(
     output_exchange,
     transaction_columns,
 ):
-    logging.basicConfig(level=logging.INFO)
-    output = _build_output_queue(mom_host, output_queue, output_exchange)
     handler = message_handler.MessageHandler()
     client_id = None
+    output = None
 
     try:
+        client_socket.setblocking(True)
+        
         while True:
-            msg_type, payload = message_protocol.external.recv_msg(client_socket)
+            try:
+                msg_type, payload = message_protocol.external.recv_msg(client_socket)
+            except Exception as e:
+                if client_id is None and "0 bytes" in str(e):
+                    logging.warning("Conexión cerrada sin enviar datos (health probe o timeout del cliente).")
+                    client_socket.close() # Cerramos acá porque el cliente se fue antes de identificarse
+                    return
+                raise e
 
             if msg_type in (
                 message_protocol.external.MsgType.ACCOUNTS_BATCH,
@@ -105,6 +103,8 @@ def handle_client_request(
                 continue
 
             if msg_type == message_protocol.external.MsgType.TRANSACTIONS_BATCH:
+                if output is None:
+                    output = _build_output_queue(mom_host, output_queue, output_exchange)
                 logging.info(f"Received transactions batch from client {client_id}")
                 transactions = _rows_to_transactions(
                     client_id, rows, transaction_columns
@@ -121,6 +121,8 @@ def handle_client_request(
                 continue
 
             if msg_type == message_protocol.external.MsgType.END_TRANSACTIONS:
+                if output is None:
+                    output = _build_output_queue(mom_host, output_queue, output_exchange)
                 logging.info(f"Received end transactions message from client {client_id}")
                 msg_client_id = payload
                 if client_id is None:
@@ -136,13 +138,16 @@ def handle_client_request(
                     message_protocol.external.MsgType.ACK,
                     client_id,
                 )
+                # Avisamos al hilo de resultados que este cliente ya terminó de mandar todo
                 client_ready[client_id] = True
-                return
+                return # RETORNO EXITOSO: NO CERRAMOS EL SOCKET, queda vivo para result_handlers
 
             raise TypeError(f"Unexpected message type: {msg_type}")
-    except socket.error:
-        logging.error("The connection with the client was lost")
     except Exception as e:
-        logging.error(e)
+        logging.error(f"Handler error for client {client_id}: {e}")
+        logging.error(traceback.format_exc())
+        client_socket.close() # Si algo falló catastróficamente en la recepción, sí cerramos el socket
     finally:
-        output.close()
+        if output is not None:
+            output.close()
+        logging.info(f"Terminó la recepción de datos de entrada para el cliente {client_id}.")

@@ -6,6 +6,7 @@ from .rabbitmq.rabbitmq_docker_service import get_rabbitmq_docker_service
 from .scatter_gather.scatter_gather_generators import get_scatter_gather_services
 from .splitter.splitter_docker_service import get_splitter_docker_services
 
+
 import csv
 import os
 
@@ -33,40 +34,53 @@ def generate_system_docker_compose(total_clients=0):
                 total_queries=1,
                 output_queue="gateway_data"
                 )
+        gateway["gateway"]["environment"].append(
+            "TRANSACTION_COLUMNS=Timestamp,From Bank,Account,To Bank,Account.1,Amount Received,Receiving Currency,Amount Paid,Payment Currency,Payment Format"
+        )
         system = system | gateway
 
-        # Create USD filters
-        prefix, total_instances = _get_next_config_row(config_file_reader)
-        usd_filters = get_filters_docker_services(prefix, total_instances,
-                                                "Payment Currency", "US Dollar", "eq",
-                                                input_queue="gateway_data",
-                                                output_queue="usd_transactions",
-                                                total_clients=total_clients,
-                                                )
+        # Lee las tres configuraciones del CSV de una sola vez
+        usd_prefix, usd_instances = _get_next_config_row(config_file_reader)          # fila 1: usd_filter,1
+        reducer_prefix, reducer_instances = _get_next_config_row(config_file_reader)  # fila 2: q1_data_reducer,2
+        filter_prefix, filter_instances = _get_next_config_row(config_file_reader)    # fila 3: q1_filter_lt_50_usd,1
+
+        # Create USD filters (1 instancia, publica en exchange aleatorio)
+        # Consume de cola de entrada, distribuye aleatoriamente a los shards del Reducer.
+        usd_filters = get_filters_docker_services(
+            usd_prefix, usd_instances,
+            "Payment Currency", "US Dollar", "eq",
+            input_queue="gateway_data",
+            output_exchange="usd_transactions_exc",
+            output_shards=reducer_instances,    # Configurado en 2 shards
+            n_upstream=1,                       # Espera 1 EOF proveniente del Gateway
+            total_clients=total_clients,
+        )
         system = system | usd_filters
 
-
-        # Query 1
-        ## Reduce data
-        prefix, total_instances = _get_next_config_row(config_file_reader)
-        data_reducers_q1 = get_data_reducer_docker_services(prefix, total_instances,
-                                                            ["From Bank", "Account", "To Bank", "Account.1", "Amount Paid"],
-                                                            input_queue="usd_transactions",
-                                                            output_queue="q1_reduced_data",
-                                                            total_clients=total_clients,
-                                                            )
+        #  Data Reducer (2 instancias)
+        # Consumen cada uno de su shard asignado, procesan y publican en un exchange propio.
+        data_reducers_q1 = get_data_reducer_docker_services(
+            reducer_prefix, reducer_instances,
+            ["From Bank", "Account", "To Bank", "Account.1", "Amount Paid"],
+            input_exchange="usd_transactions_exc",
+            output_exchange="q1_reduced_exc",       
+            output_shards=filter_instances,         # 1 shard (1 sola instancia de filtro final)
+            n_upstream=usd_instances,               # Espera EOFs de las instancias de usd_filter (1)
+            total_clients=total_clients,
+        )
         system = system | data_reducers_q1
 
-        ## Filter by amount
-        prefix, total_instances = _get_next_config_row(config_file_reader)
-        q1_50_usd_filters = get_filters_docker_services(prefix, total_instances,
-                                                        "Amount Paid", 50, "lt",
-                                                        input_queue="q1_reduced_data",
-                                                        output_queue="results_1",
-                                                        total_clients=total_clients,
-                                                        )
+        # Filtro Final de Monto < 50 USD (1 instancia)
+        # Consume del exchange del reducer, valida N_UPSTREAM y vuelca a la cola final de resultados.
+        q1_50_usd_filters = get_filters_docker_services(
+            filter_prefix, filter_instances,
+            "Amount Paid", 50, "lt",
+            input_exchange="q1_reduced_exc",       
+            output_queue="results_1",               # Destino final limpio sin exchange
+            n_upstream=reducer_instances,           # Sabe que debe esperar 2 EOFs (uno por cada Reducer)
+            total_clients=total_clients,
+        )
         system = system | q1_50_usd_filters
-
     return system
 #        # Query 2
 #        ## Reduce data

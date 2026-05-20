@@ -159,6 +159,12 @@ def handle_client_response(
             if not client_id:
                 raise ValueError("Missing client_id in result payload")
 
+            done_queries = client_query_eofs.get(client_id, [])
+            if query_id in done_queries:
+                logging.info(f"Ignorando mensaje residual de query {query_id} (el cliente ya terminó)")
+                ack()
+                return
+
             if not client_ready.get(client_id, False):
                 time.sleep(0.2)
                 nack()

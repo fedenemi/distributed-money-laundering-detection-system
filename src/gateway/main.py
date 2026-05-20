@@ -1,115 +1,106 @@
 import logging
-import multiprocessing
-import os
-import signal
 import socket
+import threading
+import os
 
 from message_handlers import client_handlers, result_handlers
-from common import middleware, message_protocol
-
-SERVER_HOST = os.environ["SERVER_HOST"]
-SERVER_PORT = int(os.environ["SERVER_PORT"])
-
-MOM_HOST = os.environ["MOM_HOST"]
-OUTPUT_QUEUE = os.environ.get("OUTPUT_QUEUE", "")
-OUTPUT_EXCHANGE = os.environ.get("OUTPUT_EXCHANGE", "")
-INPUT_QUEUE_PREFIX = os.environ["INPUT_QUEUE_PREFIX"]
-TOTAL_QUERIES = int(os.environ["TOTAL_QUERIES"])
-
-TRANSACTION_COLUMNS = [
-    "Timestamp",
-    "From Bank",
-    "Account",
-    "To Bank",
-    "Account.1",
-    "Amount Received",
-    "Receiving Currency",
-    "Amount Paid",
-    "Payment Currency",
-    "Payment Format",
-]
-
-
-
-def _get_result_queues():
-    return [f"{INPUT_QUEUE_PREFIX}_{i}" for i in range(1, TOTAL_QUERIES + 1)]
-
-
-def handle_sigterm(server_socket, client_sockets, sigterm_received):
-    server_socket.shutdown(socket.SHUT_RDWR)
-    for client_socket in client_sockets.values():
-        client_socket.shutdown(socket.SHUT_RDWR)
-    sigterm_received.value = 1
 
 
 def main():
     logging.basicConfig(level=logging.INFO)
 
-    result_queues = _get_result_queues()
-    if not result_queues:
-        raise RuntimeError("No result queues configured")
+    # Buscamos ambas variables por si tu compose usa SERVER_PORT en lugar de PORT
+    PORT = int(os.environ.get("SERVER_PORT", os.environ.get("PORT", 12345)))
+    MOM_HOST = os.environ.get("MOM_HOST", "rabbitmq")
+    OUTPUT_QUEUE = os.environ.get("OUTPUT_QUEUE", "")
+    OUTPUT_EXCHANGE = os.environ.get("OUTPUT_EXCHANGE", "")
 
-    with multiprocessing.Manager() as manager:
-        client_sockets = manager.dict()
-        bank_maps = manager.dict()
-        client_query_eofs = manager.dict()
-        client_ready = manager.dict()
-        send_lock = manager.Lock()
-        sigterm_received = manager.Value("c_short", 0)
+    # FIX: limpiamos espacios y evitamos lista [""] si no existe la variable
+    transaction_columns_raw = os.environ.get("TRANSACTION_COLUMNS", "")
+    TRANSACTION_COLUMNS = [
+        col.strip()
+        for col in transaction_columns_raw.split(",")
+        if col.strip()
+    ]
 
-        with multiprocessing.Pool(processes=os.cpu_count()) as processes_pool:
-            for index, queue_name in enumerate(result_queues, start=1):
-                processes_pool.apply_async(
-                    result_handlers.handle_client_response,
-                    (
-                        queue_name,
-                        index,
-                        MOM_HOST,
-                        client_sockets,
-                        bank_maps,
-                        client_query_eofs,
-                        client_ready,
-                        TOTAL_QUERIES,
-                        send_lock,
-                    ),
-                )
+    TOTAL_QUERIES = int(os.environ.get("TOTAL_QUERIES", "1"))
+    INPUT_QUERY_QUEUE_PREFIX = os.environ.get(
+        "INPUT_QUEUE_PREFIX",
+        "results"
+    )
 
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
-                logging.info("Listening to connections")
-                server_socket.bind((SERVER_HOST, SERVER_PORT))
-                server_socket.listen()
-                signal.signal(
-                    signal.SIGTERM,
-                    lambda signum, frame: handle_sigterm(
-                        server_socket, client_sockets, sigterm_received
-                    ),
-                )
-                while True:
-                    try:
-                        client_socket, _ = server_socket.accept()
-                        logging.info("A new client has connected")
-                        processes_pool.apply_async(
-                            client_handlers.handle_client_request,
-                            (
-                                client_socket,
-                                client_sockets,
-                                bank_maps,
-                                client_ready,
-                                MOM_HOST,
-                                OUTPUT_QUEUE,
-                                OUTPUT_EXCHANGE,
-                                TRANSACTION_COLUMNS,
-                            ),
-                        )
-                    except socket.error:
-                        if sigterm_received.value == 0:
-                            logging.error("The connection with the client was lost")
-                            return 1
-                        return 0
-                    except Exception as e:
-                        logging.error(e)
-                        return 2
-    return 0
+    result_queues = [
+        f"{INPUT_QUERY_QUEUE_PREFIX}_{i}"
+        for i in range(1, TOTAL_QUERIES + 1)
+    ]
+
+    logging.info(f"TRANSACTION_COLUMNS loaded: {TRANSACTION_COLUMNS}")
+
+    # Diccionarios estándar y el Lock
+    client_sockets = {}
+    bank_maps = {}
+    client_ready = {}
+    client_query_eofs = {}
+    send_lock = threading.Lock()
+
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    # SO_REUSEADDR evita bloqueos del puerto al reiniciar Docker
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+    server_socket.bind(("0.0.0.0", PORT))
+    server_socket.listen(5)
+
+    logging.info(f"Listening to connections on port {PORT}")
+
+    # Lanzamos handlers de resultados
+    for index, queue_name in enumerate(result_queues, start=1):
+        t = threading.Thread(
+            target=result_handlers.handle_client_response,
+            kwargs={
+                "queue_name": queue_name,
+                "client_sockets": client_sockets,
+                "bank_maps": bank_maps,
+                "client_query_eofs": client_query_eofs,
+                "client_ready": client_ready,
+                "mom_host": MOM_HOST,
+                "query_id": index,
+                "total_queries": TOTAL_QUERIES,
+                "send_lock": send_lock
+            }
+        )
+
+        t.daemon = True
+        t.start()
+
+        logging.info(f"Started result handler for queue: {queue_name}")
+
+    # Bucle principal de clientes
+    while True:
+        try:
+            client_socket, addr = server_socket.accept()
+
+            logging.info(f"A new client has connected from {addr}")
+
+            t = threading.Thread(
+                target=client_handlers.handle_client_request,
+                args=(
+                    client_socket,
+                    client_sockets,
+                    bank_maps,
+                    client_ready,
+                    MOM_HOST,
+                    OUTPUT_QUEUE,
+                    OUTPUT_EXCHANGE,
+                    TRANSACTION_COLUMNS,
+                ),
+            )
+
+            t.daemon = True
+            t.start()
+
+        except Exception as e:
+            logging.exception(f"Accept error: {e}")
 
 
 if __name__ == "__main__":

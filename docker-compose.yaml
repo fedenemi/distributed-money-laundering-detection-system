@@ -57,6 +57,8 @@ services:
     - OUTPUT_QUEUE=gateway_data
     - INPUT_QUEUE_PREFIX=results
     - TOTAL_QUERIES=1
+    - TRANSACTION_COLUMNS=Timestamp,From Bank,Account,To Bank,Account.1,Amount Received,Receiving
+      Currency,Amount Paid,Payment Currency,Payment Format
   q1_data_reducer_0:
     build:
       context: ./src
@@ -67,8 +69,28 @@ services:
         condition: service_healthy
     environment:
     - RABBITMQ_HOST=rabbitmq
-    - INPUT_QUEUE=usd_transactions
-    - OUTPUT_QUEUE=q1_reduced_data
+    - N_UPSTREAM=1
+    - INPUT_EXCHANGE=usd_transactions_exc
+    - SHARD_ID=0
+    - OUTPUT_EXCHANGE=q1_reduced_exc
+    - OUTPUT_SHARDS=1
+    - KEEP_COLUMNS=From Bank,Account,To Bank,Account.1,Amount Paid
+    - TOTAL_CLIENTS=2
+  q1_data_reducer_1:
+    build:
+      context: ./src
+      dockerfile: data_reducer/Dockerfile
+    container_name: q1_data_reducer_1
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - RABBITMQ_HOST=rabbitmq
+    - N_UPSTREAM=1
+    - INPUT_EXCHANGE=usd_transactions_exc
+    - SHARD_ID=1
+    - OUTPUT_EXCHANGE=q1_reduced_exc
+    - OUTPUT_SHARDS=1
     - KEEP_COLUMNS=From Bank,Account,To Bank,Account.1,Amount Paid
     - TOTAL_CLIENTS=2
   q1_filter_lt_50_usd_0:
@@ -82,7 +104,9 @@ services:
     environment:
     - RABBITMQ_HOST=rabbitmq
     - N_UPSTREAM=1
-    - INPUT_QUEUE=q1_reduced_data
+    - N_UPSTREAM=2
+    - INPUT_EXCHANGE=q1_reduced_exc
+    - SHARD_ID=0
     - OUTPUT_QUEUE=results_1
     - FILTER_FIELD=Amount Paid
     - FILTER_OP=lt
@@ -115,8 +139,10 @@ services:
     environment:
     - RABBITMQ_HOST=rabbitmq
     - N_UPSTREAM=1
+    - N_UPSTREAM=1
     - INPUT_QUEUE=gateway_data
-    - OUTPUT_QUEUE=usd_transactions
+    - OUTPUT_EXCHANGE=usd_transactions_exc
+    - OUTPUT_SHARDS=2
     - FILTER_FIELD=Payment Currency
     - FILTER_OP=eq
     - FILTER_VALUE=US Dollar

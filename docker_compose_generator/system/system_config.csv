@@ -1,4 +1,4 @@
 prefix,total_instances
 usd_filter,1
-q1_data_reducer, 1
-q1_filter_lt_50_usd, 1
+q1_data_reducer,2
+q1_filter_lt_50_usd,1
