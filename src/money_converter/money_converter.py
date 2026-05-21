@@ -44,6 +44,7 @@ class MoneyConverter(WorkerBase):
     def _process_req_response(self, data: bytes, ack, nack):
         response = internal.deserialize(data)
         self._reqs_results_channel.put(response[2])
+        ack()
 
     def _handle_request_response(self):
         self._reqs_responses.start_consuming(self._process_req_response)
