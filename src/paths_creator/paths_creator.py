@@ -52,8 +52,6 @@ class PathsCreator(WorkerBase):
                 self.outgoing_edges[origin] = set()
             self.outgoing_edges[origin].add(destination)
 
-        logging.info("Batch de datos procesado")
-
     # Process EOF
     def on_eof(self, client_id=None):
         logging.info("EOF recibido")
