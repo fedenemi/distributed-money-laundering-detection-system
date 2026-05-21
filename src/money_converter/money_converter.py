@@ -3,6 +3,15 @@ import os
 from common.middleware.worker_base import WorkerBase
 
 TARGET_CURRENCY_TAG = "TARGET_CURRENCY"
+CONVERSION_API_REQUESTS = "CONVERSION_API_REQUESTS"
+
+CURRENCY_CODES = {
+    "US Dollar": "USD", "Euro": "EUR", "Yuan": "CNY",
+    "Ruble": "RUB", "Yen": "JPY", "UK Pound": "GBP",
+    "Swiss Franc": "CHF", "Australian Dollar": "AUD",
+    "Canadian Dollar": "CAD", "Mexican Peso": "MXN",
+    "Brazil Real": "BRL", "Rupee": "INR", "Saudi Riyal": "SAR",
+}
 
 class MoneyConverter(WorkerBase):
 
@@ -11,6 +20,7 @@ class MoneyConverter(WorkerBase):
 
         # Get environment variables
         self._target_currency = os.environ[TARGET_CURRENCY_TAG]
+        self._conversor_api_channel = os.environ[CONVERSION_API_REQUESTS]
 
         # Currency rates
         self._currency_rates_by_date = {}
@@ -27,7 +37,7 @@ class MoneyConverter(WorkerBase):
         # Get currency rates of dates
         currency_rates = self._currency_rates_by_date.get(date, {})
 
-        # If not currency included
+        # If currency not included
         currency = data["Payment Currency"]
         if currency not in currency_rates:
             currency_rates[currency] = self._consult_currency_rates_api(date, currency)
