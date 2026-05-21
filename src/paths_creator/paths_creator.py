@@ -20,13 +20,16 @@ class PathsCreator(WorkerBase):
 
     def __init__(self):
         super().__init__()
-        # Create storage for edges of nodes
-        self.incoming_edges = {}
-        self.outgoing_edges = {}
+        # Create storage for edges of nodes by client ID
+        self.edges_by_client_id = {}
 
     # Process data message
-    def process(self, transaction):
-        logging.info("Batch de datos recibido")
+    def process(self, data):
+        # Get edge's dictionaries of according to client ID
+        client_id = data["client_id"]
+        edges_pair = self.edges_by_client_id.get(client_id, ({}, {}))
+        incoming_edges = edges_pair[0]
+        outgoing_edges = edges_pair[1]
 
         # Transaction origin
         origin = transaction_id.TransactionID(
@@ -44,28 +47,31 @@ class PathsCreator(WorkerBase):
         # Store according if it is an "incoming" edge, where the destination node is stored here,
         # or if it is an "outgoing" edge, where the origin node is stored here
         if tag == "i":
-            if destination not in self.incoming_edges:
-                self.incoming_edges[destination] = set()
-            self.incoming_edges[destination].add(origin)
+            if destination not in incoming_edges:
+                incoming_edges[destination] = set()
+            incoming_edges[destination].add(origin)
         else:
-            if origin not in self.outgoing_edges:
-                self.outgoing_edges[origin] = set()
-            self.outgoing_edges[origin].add(destination)
+            if origin not in outgoing_edges:
+                outgoing_edges[origin] = set()
+            outgoing_edges[origin].add(destination)
 
     # Process EOF
     def on_eof(self, client_id=None):
         logging.info("EOF recibido")
+        edges_pair = self.edges_by_client_id[client_id]
+        incoming_edges = edges_pair[0]
+        outgoing_edges = edges_pair[1]
 
         # For each node with incoming edges
-        for node in self.incoming_edges:
+        for node in incoming_edges:
             # Check if there are outgoing edges
-            if node in self.outgoing_edges:
+            if node in outgoing_edges:
                 # Get intermediate node ID elements
                 interm_bank, interm_acc = node.as_tuple()
 
                 # Get neighbours
-                incoming_edges_neighbours = self.incoming_edges[node]
-                outgoing_edges_neighbours = self.outgoing_edges[node]
+                incoming_edges_neighbours = incoming_edges[node]
+                outgoing_edges_neighbours = outgoing_edges[node]
 
                 # Create paths
                 for inc_neighbour in incoming_edges_neighbours:
