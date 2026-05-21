@@ -11,15 +11,22 @@ SERVICE_NAME="gateway"
 DOCKER_BUILD_SECTION_NAME = "build"
 DOCKER_BUILD_CONTEXT_SUBSECTION_NAME = "context"
 
-CONTEXT_FOLDER = "./src/gateway"
+CONTEXT_FOLDER = "./src"
 
 # Environment variable names
 DOCKER_ENV_VARS_NAME = "environment"
 
 OUTPUT_QUEUE = "OUTPUT_QUEUE"
-INPUT_QUEUE = "INPUT_QUEUE"
+OUTPUT_EXCHANGE = "OUTPUT_EXCHANGE"
+INPUT_QUEUE_PREFIX = "INPUT_QUEUE_PREFIX"
+TOTAL_QUERIES = "TOTAL_QUERIES"
 
-def get_gateway_docker_services(input_query_queue_prefix, total_queries, output_queue):
+def get_gateway_docker_services(
+    input_query_queue_prefix,
+    total_queries,
+    output_queue=None,
+    output_exchange=None,
+):
     # Open config file
     base_path = os.path.dirname(__file__)
     config_file_path = os.path.join(base_path, CONFIG_FILE)
@@ -32,9 +39,18 @@ def get_gateway_docker_services(input_query_queue_prefix, total_queries, output_
 
     # Add environment variables
     ## I/O
-    gateway_service_config[DOCKER_ENV_VARS_NAME].append(f"{OUTPUT_QUEUE}={output_queue}")
-    for i in range(total_queries):
-        gateway_service_config[DOCKER_ENV_VARS_NAME].append(f"{INPUT_QUEUE}_{i+1}={input_query_queue_prefix}_{i+1}")
+    if output_queue is not None:
+        gateway_service_config[DOCKER_ENV_VARS_NAME].append(f"{OUTPUT_QUEUE}={output_queue}")
+    elif output_exchange is not None:
+        gateway_service_config[DOCKER_ENV_VARS_NAME].append(f"{OUTPUT_EXCHANGE}={output_exchange}")
+    
+    # Total queries and input queue prefix for result queues
+    gateway_service_config[DOCKER_ENV_VARS_NAME].append(
+        f"{INPUT_QUEUE_PREFIX}={input_query_queue_prefix}"
+    )
+    gateway_service_config[DOCKER_ENV_VARS_NAME].append(
+        f"{TOTAL_QUERIES}={total_queries}"
+    )
 
     # Add service name
     new_service_config = { SERVICE_NAME : gateway_service_config}

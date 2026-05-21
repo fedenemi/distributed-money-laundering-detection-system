@@ -57,6 +57,7 @@ class WorkerBase:
         self.output_exchange = os.environ.get("OUTPUT_EXCHANGE", "")
         self.output_shards   = int(os.environ.get("OUTPUT_SHARDS", "1"))
         self.batch_size      = int(os.environ.get("BATCH_SIZE", "500"))
+        self.total_clients   = int(os.environ.get("TOTAL_CLIENTS", "0"))
 
         self._buffer: dict = {}
         self._running = True
@@ -96,11 +97,20 @@ class WorkerBase:
     def process(self, data: dict) -> list:
         raise NotImplementedError
 
-    def on_eof(self) -> list:
+    def on_eof(self, client_id=None) -> list:
         return []
 
     def _routing_key(self, msg: dict) -> str:
         """Clave de particion del mensaje. Override en Splitter."""
+        return "__queue__"
+
+    def _buffer_key(self, msg: dict) -> str:
+        if self.output_exchange and self.output_shards > 1:
+            return self._routing_key(msg)
+        if isinstance(msg, dict):
+            client_id = msg.get("client_id")
+            if client_id is not None:
+                return f"client:{client_id}"
         return "__queue__"
 
     # --- Emisión con Buffer y flush --------------------------------------------------------
@@ -109,7 +119,7 @@ class WorkerBase:
         if not results or self._producer is None:
             return
         for msg in results:
-            buf_key = self._routing_key(msg)
+            buf_key = self._buffer_key(msg)
             self._buffer.setdefault(buf_key, []).append(msg)
             if len(self._buffer[buf_key]) >= self.batch_size:
                 self._flush_key(buf_key)
@@ -128,10 +138,13 @@ class WorkerBase:
         for key in list(self._buffer.keys()):
             self._flush_key(key)
 
-    def _send_eof(self):
+    def _send_eof(self, client_id=None):
         if self._producer is None:
             return
-        eof_body = json.dumps({"type": "eof"}).encode()
+        eof_msg = {"type": "eof"}
+        if client_id is not None:
+            eof_msg["client_id"] = client_id
+        eof_body = json.dumps(eof_msg).encode()
         if self.output_exchange and self.output_shards > 1:
             self._producer.send_eof_to_all(eof_body)
         else:
@@ -142,20 +155,39 @@ class WorkerBase:
     def run(self):
         logger.info(f"{self.__class__.__name__} iniciando")
         eof_count = [0]
+        eof_per_client = {}
+        done_clients = set()
 
         def on_message(body: bytes, ack, nack):
             try:
                 msg = json.loads(body)
                 if msg.get("type") == "eof":
-                    eof_count[0] += 1
+                    client_id = msg.get("client_id")
+                    if client_id is None:
+                        eof_count[0] += 1
+                        ack()
+                        if eof_count[0] >= self.n_upstream:
+                            for result in self.on_eof(None):
+                                self._emit([result])
+                            self._flush_all()
+                            self._send_eof()
+                            self._consumer.stop_consuming()
+                            logger.info(f"{self.__class__.__name__} terminado")
+                        return
+
+                    eof_per_client[client_id] = eof_per_client.get(client_id, 0) + 1
                     ack()
-                    if eof_count[0] >= self.n_upstream:
-                        for result in self.on_eof():
+                    if eof_per_client[client_id] >= self.n_upstream and client_id not in done_clients:
+                        for result in self.on_eof(client_id):
                             self._emit([result])
                         self._flush_all()
-                        self._send_eof()
+                        self._send_eof(client_id)
+                        done_clients.add(client_id)
+
+                    if self.total_clients > 0 and len(done_clients) >= self.total_clients:
                         self._consumer.stop_consuming()
                         logger.info(f"{self.__class__.__name__} terminado")
+                    return
                 else:
                     for row in msg.get("rows", []):
                         self._emit(self.process(row))

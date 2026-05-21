@@ -1,9 +1,16 @@
 build:
-  context: ./src/client
-  dockerfile: Dockerfile
+  context: ./src
+  dockerfile: client/Dockerfile
 container_name: client_0
+depends_on:
+  gateway:
+    condition: service_started
 environment:
 - MOM_HOST=rabbitmq
 - PYTHONUNBUFFERED=1
 - SERVER_HOST=gateway
 - SERVER_PORT=7659
+- BATCH_SIZE=500
+volumes:
+- ./datasets:/datasets
+- ./results:/results

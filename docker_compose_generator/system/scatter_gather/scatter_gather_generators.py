@@ -25,9 +25,10 @@ DOCKER_ENV_VARS_NAME = "environment"
 ## I/O
 INPUT_EXCHANGE_TAG = "INPUT_EXCHANGE"
 OUTPUT_QUEUE_TAG = "OUTPUT_QUEUE"
+TOTAL_CLIENTS_TAG = "TOTAL_CLIENTS"
 
 
-def get_scatter_gather_services(service_prefix, service_type, input_exchange, output_queue, total_instances):
+def get_scatter_gather_services(service_prefix, service_type, input_exchange, output_queue, total_instances, total_clients=0):
     # Open config file
     config_file_name = CONFIGS_FILES[service_type]
     with open(config_file_name, "r") as config_file:
@@ -47,6 +48,9 @@ def get_scatter_gather_services(service_prefix, service_type, input_exchange, ou
         # Add environment variables
         new_service_config[DOCKER_ENV_VARS_NAME].append(f"{INPUT_EXCHANGE_TAG}={input_exchange}")
         new_service_config[DOCKER_ENV_VARS_NAME].append(f"{OUTPUT_QUEUE_TAG}={output_queue}")
+
+        if total_clients > 0:
+            new_service_config[DOCKER_ENV_VARS_NAME].append(f"{TOTAL_CLIENTS_TAG}={total_clients}")
 
         # Add service in services dictionary
         scatter_gather_services[new_service_name] = new_service_config

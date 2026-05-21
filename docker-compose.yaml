@@ -1,8 +1,50 @@
 services:
+  client_0:
+    build:
+      context: ./src
+      dockerfile: client/Dockerfile
+    container_name: client_0
+    depends_on:
+      gateway:
+        condition: service_started
+    environment:
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - SERVER_HOST=gateway
+    - SERVER_PORT=7659
+    - BATCH_SIZE=500
+    - TRANSACTIONS_FILE=/datasets/transactions_medium_reduced.csv
+    - ACCOUNTS_FILE=/datasets/accounts_medium_reduced.csv
+    - CLIENT_ID=0
+    - RESULTS_DIR=/results
+    volumes:
+    - ./datasets:/datasets
+    - ./results:/results
+  client_1:
+    build:
+      context: ./src
+      dockerfile: client/Dockerfile
+    container_name: client_1
+    depends_on:
+      gateway:
+        condition: service_started
+    environment:
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - SERVER_HOST=gateway
+    - SERVER_PORT=7659
+    - BATCH_SIZE=500
+    - TRANSACTIONS_FILE=/datasets/transactions_medium_reduced.csv
+    - ACCOUNTS_FILE=/datasets/accounts_medium_reduced.csv
+    - CLIENT_ID=1
+    - RESULTS_DIR=/results
+    volumes:
+    - ./datasets:/datasets
+    - ./results:/results
   gateway:
     build:
-      context: ./src/gateway
-      dockerfile: Dockerfile
+      context: ./src
+      dockerfile: gateway/Dockerfile
     container_name: gateway
     depends_on:
       rabbitmq:
@@ -12,48 +54,70 @@ services:
     - PYTHONUNBUFFERED=1
     - SERVER_HOST=gateway
     - SERVER_PORT=7659
-    - OUTPUT_QUEUE=raw_data_queue
-    - INPUT_QUEUE_0=results_0
-    - INPUT_QUEUE_1=results_1
-    - INPUT_QUEUE_2=results_2
-    - INPUT_QUEUE_3=results_3
-    - INPUT_QUEUE_4=results_4
+    - OUTPUT_QUEUE=gateway_data
+    - INPUT_QUEUE_PREFIX=results
+    - TOTAL_QUERIES=1
   q1_data_reducer_0:
     build:
-      context: ./src/data_cleaner
-      dockerfile: Dockerfile
+      context: ./src
+      dockerfile: data_reducer/Dockerfile
     container_name: q1_data_reducer_0
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
     environment:
     - RABBITMQ_HOST=rabbitmq
-    - N_UPSTREAM=1
-    - INPUT_EXCHANGE=usd_transactions_exc
-    - N_UPSTREAM=1
-    - SHARD_ID=0
+    - INPUT_QUEUE=usd_transactions
     - OUTPUT_QUEUE=q1_reduced_data
     - KEEP_COLUMNS=From Bank,Account,To Bank,Account.1,Amount Paid
+    - TOTAL_CLIENTS=2
   q1_filter_lt_50_usd_0:
     build:
-      context: ./src/filter
-      dockerfile: Dockerfile
+      context: ./src
+      dockerfile: filters/Dockerfile
     container_name: q1_filter_lt_50_usd_0
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
     environment:
     - RABBITMQ_HOST=rabbitmq
     - N_UPSTREAM=1
     - INPUT_QUEUE=q1_reduced_data
     - OUTPUT_QUEUE=results_1
     - FILTER_FIELD=Amount Paid
-    - FILTER_OP=50
-    - FILTER_VALUE=lt
+    - FILTER_OP=lt
+    - FILTER_VALUE=50
+    - TOTAL_CLIENTS=2
+  rabbitmq:
+    build:
+      context: ./src/rabbitmq
+      dockerfile: Dockerfile
+    container_name: rabbitmq
+    environment:
+    - RABBITMQ_LOG_LEVELS=warning
+    healthcheck:
+      interval: 5s
+      retries: 10
+      start_period: 50s
+      test: rabbitmq-diagnostics check_port_connectivity
+      timeout: 3s
+    ports:
+    - 5672:5672
+    - 15672:15672
   usd_filter_0:
     build:
-      context: ./src/filter
-      dockerfile: Dockerfile
+      context: ./src
+      dockerfile: filters/Dockerfile
     container_name: usd_filter_0
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
     environment:
     - RABBITMQ_HOST=rabbitmq
     - N_UPSTREAM=1
-    - INPUT_QUEUE=cleanded_data_queue
-    - OUTPUT_EXCHANGE=usd_transactions_exc
+    - INPUT_QUEUE=gateway_data
+    - OUTPUT_QUEUE=usd_transactions
     - FILTER_FIELD=Payment Currency
     - FILTER_OP=eq
     - FILTER_VALUE=US Dollar
+    - TOTAL_CLIENTS=2

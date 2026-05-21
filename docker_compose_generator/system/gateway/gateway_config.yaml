@@ -1,6 +1,6 @@
 build:
-  context: ./src/gateway
-  dockerfile: Dockerfile
+  context: ./src
+  dockerfile: gateway/Dockerfile
 container_name: gateway
 depends_on:
   rabbitmq:

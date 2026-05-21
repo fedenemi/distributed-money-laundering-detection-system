@@ -4,8 +4,8 @@ RUN pip3 install pika
 
 WORKDIR /app
 COPY common ./common
-COPY filters ./filters
+COPY data_reducer ./data_reducer
 
 ENV PYTHONPATH=/app:/app/common
 
-ENTRYPOINT ["python3", "-m", "filters.main"]
+ENTRYPOINT ["python3", "-m", "data_reducer.main"]

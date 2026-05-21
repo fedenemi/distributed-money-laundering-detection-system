@@ -43,7 +43,7 @@ class Splitter(WorkerBase):
             data = {**data, "source": self._tag_source}
         return [data]
 
-    def on_eof(self):
+    def on_eof(self, client_id=None):
         return iter([])
 
 

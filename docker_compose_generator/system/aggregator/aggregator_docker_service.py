@@ -30,13 +30,15 @@ AGG_FIELD_TAG = "AGG_FIELD"
 KEY_FIELD_TAG = "KEY_FIELD"
 CARRY_FIELDS_TAG = "CARRY_FIELDS"
 OUTPUT_TAG_TAG = "OUTPUT_TAG"
+TOTAL_CLIENTS_TAG = "TOTAL_CLIENTS"
 
 
 def get_aggregator_docker_services(service_prefix, total_instances,
                                input_queue=None, input_exchange=None,
                                output_queue=None, output_exchange=None,
                                agg_op="count", agg_field=None, key_field=None,
-                               carry_fields=None, output_tag=None):
+                               carry_fields=None, output_tag=None,
+                               total_clients=0):
     
     # Open config file
     with open(CONFIG_FILE, "r") as config_file:
@@ -77,9 +79,15 @@ def get_aggregator_docker_services(service_prefix, total_instances,
         if key_field is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{KEY_FIELD_TAG}={key_field}")
         if carry_fields is not None:
-            new_service_config[DOCKER_ENV_VARS_NAME].append(f"{CARRY_FIELDS_TAG}={",".join(carry_fields)}")
+            carry_fields_value = ",".join(carry_fields)
+            new_service_config[DOCKER_ENV_VARS_NAME].append(
+                f"{CARRY_FIELDS_TAG}={carry_fields_value}"
+            )
         if output_tag is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{OUTPUT_TAG_TAG}={output_tag}")
+
+        if total_clients > 0:
+            new_service_config[DOCKER_ENV_VARS_NAME].append(f"{TOTAL_CLIENTS_TAG}={total_clients}")
 
         # Add service in services dictionary
         aggregator_services[new_service_name] = new_service_config

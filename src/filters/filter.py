@@ -152,6 +152,8 @@ class FilterWorker(WorkerBase):
         }
         self.op_func = self._ops.get(FILTER_OP, self._ops["eq"])
 
+        logger.info(f"Initialized FilterWorker with FILTER_FIELD='{FILTER_FIELD}', FILTER_OP='{FILTER_OP}', FILTER_VALUE='{FILTER_VALUE}', DROP_FILTER_FIELD={self.drop_filter_field}")
+
         super().__init__()
 
 
@@ -167,12 +169,20 @@ class FilterWorker(WorkerBase):
 
     def process(self, data: dict):
         """Recibe fila dict. Devuelve [data] si cumple, [] si no. Lanza errores para WorkerBase."""
+        
+        if not isinstance(data, dict):
+            raise TypeError("Se esperaba dict como input para el filtro")
+        
+        if "client_id" not in data:
+            logger.warning("client_id no encontrado en data")
+        
         target = _extract_target(data, self.filter_field_key)
 
         # date-range matching (requires FILTER_OP == 'in' by init check)
         if self._is_date_range:
             if _target_matches_date_range(target, self._date_start, self._date_end):
                 self._maybe_drop_field(data)
+                logger.info(f"Row matches date range filter: {target} in [{self._date_start}, {self._date_end}]")
                 return [data]
             return []
 
@@ -180,6 +190,7 @@ class FilterWorker(WorkerBase):
         if self._value_set is not None:
             if _target_in_value_set(target, self._value_set):
                 self._maybe_drop_field(data)
+                logger.info(f"Row matches value set filter: {target} in {self._value_set}")
                 return [data]
             return []
 
@@ -187,9 +198,12 @@ class FilterWorker(WorkerBase):
         target_cast = target
         try:
             if isinstance(self.filter_value, int):
-                target_cast = int(target)
+                try:
+                    target_cast = int(target)
+                except Exception:
+                    target_cast = float(str(target).replace(",", "."))
             elif isinstance(self.filter_value, float):
-                target_cast = float(target)
+                target_cast = float(str(target).replace(",", "."))
             elif isinstance(self.filter_value, datetime.date):
                 dt = parse_date(target)
                 if isinstance(dt, datetime.date):
@@ -200,6 +214,7 @@ class FilterWorker(WorkerBase):
         try:
             if self.op_func(target_cast, self.filter_value):
                 self._maybe_drop_field(data)
+                logger.info(f"Row matches filter: {target_cast} {FILTER_OP} {self.filter_value}")
                 return [data]
             return []
         except Exception:
@@ -207,5 +222,5 @@ class FilterWorker(WorkerBase):
             return []
 
 
-    def on_eof(self):
+    def on_eof(self, client_id=None):
         return []

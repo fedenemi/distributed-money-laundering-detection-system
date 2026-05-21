@@ -1,5 +1,9 @@
 build:
-  dockerfile: Dockerfile
+  context: ./src
+  dockerfile: filters/Dockerfile
+depends_on:
+  rabbitmq:
+    condition: service_healthy
 environment:
 - RABBITMQ_HOST=rabbitmq
 - N_UPSTREAM=1

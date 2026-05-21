@@ -76,7 +76,7 @@ class Aggregator(WorkerBase):
 
         return []
 
-    def on_eof(self):
+    def on_eof(self, client_id=None):
         count = 0
         for k, acc in self._state.items():
             result = {}

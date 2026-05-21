@@ -12,7 +12,6 @@ Uso:
 """
 import argparse
 import csv
-import json
 import os
 import sys
 import requests
@@ -103,9 +102,12 @@ def load_accounts(path):
 
 def serial_q1(rows):
     return [
-        {"from_account": r["from_account"],
-         "to_account":   r["to_account"],
-         "amount":       r["amount"]}
+        {
+        "from_bank":    r["from_bank"],
+        "from_account": r["from_account"],
+        "to_bank":      r["to_bank"],
+        "to_account":   r["to_account"],
+        "amount":       r["amount"]}
         for r in rows
         if r["payment_currency"] == "US Dollar" and r["amount"] < 50
     ]
@@ -204,13 +206,60 @@ def compare(q, expected, actual, show_diff):
     return False
 
 
+def _parse_float(value):
+    try:
+        return float(str(value).replace(",", "."))
+    except Exception:
+        return value
+
+
+def _is_numeric_key(key):
+    if key in {"amount", "count", "n_intermediaries"}:
+        return True
+    if key.startswith("avg_") or key.startswith("sum_"):
+        return True
+    return False
+
+
+def _find_results_csv(results_dir, q):
+    qnum = q[1:] if q.startswith("q") else q
+    path = os.path.join(results_dir, f"results_q{qnum}.csv")
+    return [path] if os.path.exists(path) else []
+
+
+def _csv_row_to_result(q, row, expected_keys):
+    if expected_keys:
+        values = row[:len(expected_keys)]
+        mapped = {}
+        for k, v in zip(expected_keys, values):
+            mapped[k] = _parse_float(v) if _is_numeric_key(k) else v
+        return mapped
+
+    return {f"col_{i}": _parse_float(v) for i, v in enumerate(row)}
+
+
+def load_results_from_csv(results_paths, q, expected):
+    expected_keys = list(expected[0].keys()) if expected else []
+    rows = []
+    for path in results_paths:
+        with open(path, newline="", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if not row:
+                    continue
+                if expected_keys and row == expected_keys:
+                    continue
+                rows.append(_csv_row_to_result(q, row, expected_keys))
+    return rows
+
+
 #----------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--transactions", required=True, help="Path a LI-Small_Trans.csv")
     ap.add_argument("--accounts",     required=True, help="Path a LI-Small_accounts.csv")
-    ap.add_argument("--results-dir",  required=True, help="Directorio con los JSON de resultados")
+    ap.add_argument("--results-dir",  required=True, help="Directorio con los CSV de resultados (results_q*.csv)")
     ap.add_argument("--show-diff",    action="store_true")
     args = ap.parse_args()
 
@@ -232,13 +281,13 @@ def main():
     print("\nComparando con resultados del sistema distribuido...")
     all_ok = True
     for q, expected in serial.items():
-        path = os.path.join(args.results_dir, f"{q}.json")
-        if not os.path.exists(path):
-            print(f"  FALTA {q}: archivo no encontrado ({path})")
+        paths = _find_results_csv(args.results_dir, q)
+        if not paths:
+            expected_path = os.path.join(args.results_dir, f"results_q{q[1:]}.csv")
+            print(f"  FALTA {q}: archivo no encontrado ({expected_path})")
             all_ok = False
             continue
-        with open(path) as f:
-            actual = json.load(f)
+        actual = load_results_from_csv(paths, q, expected)
         ok = compare(q, expected, actual, args.show_diff)
         all_ok = all_ok and ok
 

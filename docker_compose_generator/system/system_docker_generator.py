@@ -2,6 +2,7 @@ from .aggregator.aggregator_docker_service import get_aggregator_docker_services
 from .data_reducer.data_reducer_docker_service import get_data_reducer_docker_services
 from .filter.filter_docker_service import get_filters_docker_services
 from .gateway.gateway_docker_service import get_gateway_docker_services
+from .rabbitmq.rabbitmq_docker_service import get_rabbitmq_docker_service
 from .scatter_gather.scatter_gather_generators import get_scatter_gather_services
 from .splitter.splitter_docker_service import get_splitter_docker_services
 
@@ -12,8 +13,12 @@ def _get_next_config_row(config_file):
     row = next(config_file)
     return row["prefix"], int(row["total_instances"])
 
-def generate_system_docker_compose():
+def generate_system_docker_compose(total_clients=0):
     system = {}
+
+    # Create rabbitmq
+    rabbitmq = get_rabbitmq_docker_service()
+    system = system | rabbitmq
 
     base_path = os.path.dirname(__file__)
     csv_path = os.path.join(base_path, "system_config.csv")
@@ -24,17 +29,19 @@ def generate_system_docker_compose():
 
         # Create gateway
         gateway = get_gateway_docker_services(
-                    input_query_queue_prefix="results",
-                    total_queries=5, output_queue="raw_data_queue"
-                    )
+                input_query_queue_prefix="results",
+                total_queries=1,
+                output_queue="gateway_data"
+                )
         system = system | gateway
 
-        # Create data
+        # Create USD filters
         prefix, total_instances = _get_next_config_row(config_file_reader)
         usd_filters = get_filters_docker_services(prefix, total_instances,
                                                 "Payment Currency", "US Dollar", "eq",
-                                                input_queue="cleanded_data_queue",
-                                                output_exchange="usd_transactions_exc",
+                                                input_queue="gateway_data",
+                                                output_queue="usd_transactions",
+                                                total_clients=total_clients,
                                                 )
         system = system | usd_filters
 
@@ -44,17 +51,19 @@ def generate_system_docker_compose():
         prefix, total_instances = _get_next_config_row(config_file_reader)
         data_reducers_q1 = get_data_reducer_docker_services(prefix, total_instances,
                                                             ["From Bank", "Account", "To Bank", "Account.1", "Amount Paid"],
-                                                            input_exchange="usd_transactions_exc",
+                                                            input_queue="usd_transactions",
                                                             output_queue="q1_reduced_data",
+                                                            total_clients=total_clients,
                                                             )
         system = system | data_reducers_q1
 
         ## Filter by amount
         prefix, total_instances = _get_next_config_row(config_file_reader)
         q1_50_usd_filters = get_filters_docker_services(prefix, total_instances,
-                                                        "Amount Paid", "lt", "50",
+                                                        "Amount Paid", 50, "lt",
                                                         input_queue="q1_reduced_data",
                                                         output_queue="results_1",
+                                                        total_clients=total_clients,
                                                         )
         system = system | q1_50_usd_filters
 
