@@ -28,7 +28,7 @@ OUTPUT_QUEUE_TAG = "OUTPUT_QUEUE"
 TOTAL_CLIENTS_TAG = "TOTAL_CLIENTS"
 
 
-def get_scatter_gather_services(service_prefix, service_type, input_exchange, output_queue, total_instances, total_clients=0):
+def get_scatter_gather_services(service_prefix, total_instances, service_type, input_exchange, output_queue, total_clients=0):
     # Open config file
     config_file_name = CONFIGS_FILES[service_type]
     with open(config_file_name, "r") as config_file:

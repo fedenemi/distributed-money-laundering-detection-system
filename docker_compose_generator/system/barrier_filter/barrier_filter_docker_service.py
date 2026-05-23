@@ -26,19 +26,19 @@ SEC_N_UPSTREAM_TAG="SEC_N_UPSTREAM"
 OUTPUT_QUEUE_TAG = "MAIN_OUTPUT_QUEUE"
 OUTPUT_EXCHANGE_TAG = "MAIN_OUTPUT_EXCHANGE"
 
-def get_money_converters(service_prefix, total_instances,
+def get_barrier_filters_services(service_prefix, total_instances,
                         main_input_queue=None, main_input_exchange=None, main_n_upstream=None,
                         sec_input_queue=None, sec_input_exchange=None, sec_n_upstream=None,
                         output_queue=None, output_exchange=None,
                         ):
     with open(CONFIG_FILE, "r") as config_file:
-        base_money_converter_service = yaml.safe_load(config_file)
+        base_barrier_filter_service = yaml.safe_load(config_file)
 
     # Create all services
     aggregator_services = {}
     for i in range(total_instances):
         # Copy service base configuration
-        new_service_config = copy.deepcopy(base_money_converter_service)
+        new_service_config = copy.deepcopy(base_barrier_filter_service)
 
         # Add container name
         new_service_name = f"{service_prefix}_{i}"

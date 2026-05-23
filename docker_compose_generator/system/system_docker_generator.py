@@ -5,6 +5,7 @@ from .gateway.gateway_docker_service import get_gateway_docker_services
 from .rabbitmq.rabbitmq_docker_service import get_rabbitmq_docker_service
 from .scatter_gather.scatter_gather_generators import get_scatter_gather_services
 from .splitter.splitter_docker_service import get_splitter_docker_services
+from .barrier_filter.barrier_filter_docker_service import get_barrier_filters_services
 
 
 import csv
@@ -42,9 +43,27 @@ def generate_system_docker_compose(total_clients=0):
         q2_reducer_prefix, q2_reducer_instances = _get_next_config_row(config_file_reader)
         q2_aggregator_prefix, q2_aggregator_instances = _get_next_config_row(config_file_reader)
 
+        q3_data_reducer_prefix, q3_data_reducer_instances = _get_next_config_row(config_file_reader)
+        q3_filter_06092022_15092022_prefix, q3_filter_06092022_15092022_instances = _get_next_config_row(config_file_reader)
+        q3_filter_01092022_05092022_prefix, q3_filter_01092022_05092022_instances = _get_next_config_row(config_file_reader)
+        q3_splitter_by_payment_method_prefix, q3_splitter_by_payment_method_instances = _get_next_config_row(config_file_reader)
+        q3_avg_aggregators_preceding_period_prefix, q3_avg_aggregators_preceding_period_instances = _get_next_config_row(config_file_reader)
+        q3_avg_and_transactions_joiner_prefix, q3_avg_and_transactions_joiner_instances = _get_next_config_row(config_file_reader)
+
+        q4_data_reducer_prefix, q4_data_reducer_instances = _get_next_config_row(config_file_reader)
+        q4_filter_01092022_05092022_prefix, q4_filter_01092022_05092022_instances = _get_next_config_row(config_file_reader)
+        q4_splitters_by_origin_and_dest_prefix, q4_splitters_by_origin_and_dest_instances = _get_next_config_row(config_file_reader)
+        q4_transaction_graph_prefix, q4_transaction_graph_instances = _get_next_config_row(config_file)
+        q4_graphs_edges_splitters_prefix, q4_graphs_edges_splitters_instances = _get_next_config_row(config_file)
+        q4_paths_creators_prefix, q4_paths_creators_instances = _get_next_config_row(config_file)
+        q4_paths_splitters_by_ends_prefix, q4_paths_splitters_by_ends_instances = _get_next_config_row(config_file)
+        q4_unique_paths_counters_prefix, q4_unique_paths_counters_instances = _get_next_config_row(config_file)
+
         gateway["gateway"]["environment"].append(f"OUTPUT_SHARDS={usd_instances}")
         gateway["gateway"]["environment"].append(f"QUERY_1_N_UPSTREAM={filter_instances}")
         gateway["gateway"]["environment"].append(f"QUERY_2_N_UPSTREAM={q2_aggregator_instances}")
+        gateway["gateway"]["environment"].append(f"QUERY_3_N_UPSTREAM={q3_avg_and_transactions_joiner}")
+        gateway["gateway"]["environment"].append(f"QUERY_4_N_UPSTREAM={q4_unique_paths_counters_instances}")
         gateway["gateway"]["environment"].append(
             "TRANSACTION_COLUMNS=Timestamp,From Bank,Account,To Bank,Account.1,"
             "Amount Received,Receiving Currency,Amount Paid,Payment Currency,Payment Format"
@@ -129,103 +148,140 @@ def generate_system_docker_compose(total_clients=0):
         # QUERY 3
         # =========================================================
 
+        # Reduce data
+        data_reducers_q3 = get_data_reducer_docker_services(
+            q3_data_reducer_prefix, q3_data_reducer_instances,
+            ["Timestamp", "From Bank", "Account", "Amount Paid", "Payment Format"],
+            input_exchange="usd_transactions_exc",
+            output_exchange="q3_reduced_data_exc",
+        )
+        system = system | data_reducers_q3
+
+        # Filter data by date
+        # Filter dates between 06/09/2022 and 15/09/2022 included
+        q3_filters_06092022_15092022 = get_filters_docker_services(
+            q3_filter_06092022_15092022_prefix, q3_filter_06092022_15092022_instances,
+            filter_field="Timestamp", filter_op="in", filter_value='["2022/09/06", "2022/09/15"]',
+            input_exchange="q3_reduced_data_exc",
+            output_queue="q3_transactions_queue",
+        )
+        system = system | q3_filters_06092022_15092022
+
+        # Filter dates between 01/09/2022 and 05/09/2022 included
+        q3_filters_01092022_05092022 = get_filters_docker_services(
+            q3_filter_01092022_05092022_prefix, q3_filter_01092022_05092022_instances,
+            filter_field="Timestamp", filter_op="in", filter_value='["2022/09/01", "2022/09/05"]',
+            input_exchange="q3_reduced_data_exc",
+            output_queue="q3_splitter_queue",
+        )
+        system = system | q3_filters_01092022_05092022
+
+        # Split by payment method
+        q3_splitters_by_payment_method = get_splitter_docker_services(
+            q3_splitter_by_payment_method_prefix, q3_splitter_by_payment_method_instances,
+            input_queue="q3_splitter_queue",
+            output_exchange="q3_split_by_payment_method_exc",
+            key_field="Payment Method",
+        )
+        system = system | q3_splitters_by_payment_method
+
+        # Average aggregator
+        q3_avg_aggregators = get_aggregator_docker_services(
+            q3_avg_aggregators_preceding_period_prefix, q3_avg_aggregators_preceding_period_instances,
+            input_exchange="q3_split_by_payment_method_exc",
+            output_queue="q3_avg_preceding_period",
+            agg_op="avg", agg_field="Amount Paid", key_field="Payment Format",
+        )
+        system = system | q3_avg_aggregators
+
+        # Filter with barrier
+        q3_avg_and_transactions_joiner = get_barrier_filters_services(
+            q3_avg_and_transactions_joiner_prefix, q3_avg_and_transactions_joiner_instances,
+            main_input_queue="q3_transactions_queue",
+            sec_input_queue="q3_avg_preceding_period",
+            output_queue="q3_transactions_queue",
+        )
+        system = system | q3_avg_and_transactions_joiner
+
+        # =========================================================
+        # QUERY 4
+        # =========================================================
+
+        # Reduce data
+        data_reducers_q4 = get_data_reducer_docker_services(
+            q4_data_reducer_prefix, q4_data_reducer_instances,
+            ["Timestamp", "From Bank", "Account", "To Bank", "Account.1"],
+            input_exchange="usd_transactions_exc",
+            output_exchange="q4_reduced_data_exc",
+        )
+        system = system | data_reducers_q4
+
+        # Filter dates between 01/09/2022 and 05/09/2022 included
+        q4_filters_01092022_05092022 = get_filters_docker_services(
+            q4_filter_01092022_05092022_prefix, q4_filter_01092022_05092022_instances,
+            filter_field="Timestamp", filter_op="in", filter_value='["2022/09/01", "2022/09/05"]',
+            input_exchange="q4_reduced_data_exc",
+            output_queue="q4_splitter_queue",
+        )
+        system = system | q4_filters_01092022_05092022
+
+        # Split by origin and destination accounts
+        q4_splitters_by_origin_and_dest = get_splitter_docker_services(
+            q4_splitters_by_origin_and_dest_prefix, q4_splitters_by_origin_and_dest_instances,
+            input_queue="q4_splitter_queue",
+            output_exchange="q4_split_by_origin_and_dest_exc",
+            key_fields=["From Bank", "Account", "To Bank", "Account.1"],
+        )
+        system = system | q4_splitters_by_origin_and_dest
+
+        # Create subgraphs of transactions
+        q4_transactions_graphs = get_scatter_gather_services(
+            q4_transaction_graph_prefix, q4_transaction_graph_instances,
+            "sub_graph_agg",
+            "q4_split_by_origin_and_dest_exc",
+            "q4_subgraphs_edges",
+        )
+        system = system | q4_transactions_graphs
+
+        # Send edges as "in" for destination node and "out" for origin node
+        q4_graphs_edges_splitters = get_splitter_docker_services(
+            q4_graphs_edges_splitters_prefix, q4_graphs_edges_splitters_instances,
+            input_queue="q4_subgraphs_edges",
+            output_exchange="q4_edges_exc",
+            key_fields=["From Bank", "Account", "To Bank", "Account.1"],
+        )
+        system = system | q4_graphs_edges_splitters
+
+        # Paths creators
+        q4_paths_creators = get_scatter_gather_services(
+            q4_paths_creators_prefix, q4_paths_creators_instances,
+            "paths_creator",
+            "q4_edges_exc",
+            "q4_split_by_origin_and_dest_queue",
+        )
+        system = system | q4_paths_creators
+
+        # Split by origin and destination nodes
+        q4_paths_splitters_by_ends = get_splitter_docker_services(
+            q4_paths_splitters_by_ends_prefix, q4_paths_splitters_by_ends_instances,
+            input_queue="q4_split_by_origin_and_dest_queue",
+            output_exchange="q4_unique_paths_counter_exc",
+            key_fields=["From Bank", "Account", "To Bank", "Account.1"],
+        )
+        system = system | q4_paths_splitters_by_ends
+
+        # Unique paths counters
+        q4_unique_paths_counters = get_scatter_gather_services(
+            q4_unique_paths_counters_prefix,
+            q4_unique_paths_counters_instances,
+            "unique_paths_count",
+            "q4_paths_exc",
+            "results_4",
+        )
+        system = system | q4_unique_paths_counters
 
     return system
-#        # Query 3
-#        ## Reduce data
-#        data_reducers_q3 = get_data_reducer_docker_services("q3_data_reducer", 1,
-#                                                            ["Timestamp", "From Bank", "Account", "Amount Paid", "Payment Format"],
-#                                                            input_exchange="usd_transactions_exc",
-#                                                            output_exchange="q3_reduced_data_exc",
-#                                                            )
-#        system = system | data_reducers_q3
-#
-#        ## Filter data by date
-#        ### Filter dates between 06/09/2022 and 15/09/2022 included
-#        raise Exception("TODO: Ver que fecha caiga entre 06/09/2022 y 15/09/2022 inclusive")
-#
-#        ### Filter dates between 01/09/2022 and 05/09/2022 included
-#        raise Exception("TODO: Ver que fecha caiga entre 01/09/2022 y 05/09/2022 inclusive")
-#
-#        ### Split by payment method
-#        q3_splitters_by_payment_method = get_splitter_docker_services("q3_splitter_by_payment_method", 1,
-#                                                            input_queue="q3_filter_preceding_period",
-#                                                            output_exchange="q3_split_by_payment_method_exc",
-#                                                            key_field="Payment Method",
-#                                                            )
-#        system = system | q3_splitters_by_payment_method
-#
-#        ### Average aggregator
-#        q3_avg_aggregators = get_aggregator_docker_services("q3_avg_aggregators_preceding_period", 1,
-#                                                            input_exchange="q3_split_by_payment_method_exc",
-#                                                            output_queue="q3_avg_preceding_period",
-#                                                            agg_op="avg", agg_field="Amount Paid", key_field="Payment Format",
-#                                                            )
-#        system = system | q3_avg_aggregators
-#
-#        ## Filter with barrier
-#        raise Exception("TODO: Filtro con barrera")
-#
-#
-#        # Query 4
-#        ## Reduce data
-#        data_reducers_q4 = get_data_reducer_docker_services("q4_data_reducer", 1,
-#                                                            ["Timestamp", "From Bank", "Account", "To Bank", "Account.1"],
-#                                                            input_exchange="usd_transactions_exc",
-#                                                            output_exchange="q4_reduced_data_exc",
-#                                                            )
-#        system = system | data_reducers_q4
-#
-#        ## Filter dates between 01/09/2022 and 05/09/2022 included
-#        raise Exception("TODO: Ver que fecha caiga entre 01/09/2022 y 05/09/2022 inclusive")
-#
-#        ## Split by origin and destination accounts
-#        q4_splitters_by_origin_and_dest = get_splitter_docker_services("q4_splitter_by_origin_and_dest", 1,
-#                                                            input_queue="q4_filter_period",
-#                                                            output_exchange="q4_split_by_origin_and_dest_exc",
-#                                                            key_fields=["From Bank", "Account", "To Bank", "Account.1"],
-#                                                            )
-#        system = system | q4_splitters_by_origin_and_dest
-#
-#        ## Create subgraphs of transactions
-#        q4_transactions_graphs = get_scatter_gather_services("transaction_graph", "sub_graph_agg",
-#                                                            "q4_split_by_origin_and_dest_exc",
-#                                                            "q4_subgraphs_edges",
-#                                                            1
-#                                                            )
-#        
-#        ## Send edges as "in" for destination node and "out" for origin node
-#        q4_graphs_edges_splitters = get_splitter_docker_services("q4_edges_splitter", 1,
-#                                                            input_queue="q4_subgraphs_edges",
-#                                                            output_exchange="q4_edges_exc",
-#                                                            key_fields=["From Bank", "Account", "To Bank", "Account.1"],
-#                                                            )
-#
-#        ## Paths creators
-#        q4_paths_creators = get_scatter_gather_services("q4_path_creator", "paths_creator",
-#                                                        "q4_edges_exc",
-#                                                        "q4_split_by_origin_and_dest_queue",
-#                                                        1
-#                                                        )
-#        system = system | q4_paths_creators
-#
-#        ## Split by origin and destination nodes
-#        q4_paths_splitters_by_ends = get_splitter_docker_services("q4_path_splitter", 1,
-#                                                                input_queue="q4_split_by_origin_and_dest_queue",
-#                                                                output_exchange="q4_unique_paths_counter_exc",
-#                                                                key_fields=["From Bank", "Account", "To Bank", "Account.1"],
-#                                                                )
-#        system = system | q4_paths_splitters_by_ends
-#
-#        ## Unique paths counters
-#        q4_unique_paths_counters = get_scatter_gather_services("q4_unique_paths_counter", "unique_paths_count",
-#                                                            "q4_paths_exc",
-#                                                            "results_4",
-#                                                            1
-#                                                            )
-#        system = system | q4_unique_paths_counters
-#
-#
+
 #        # Query 5
 #        ## Data reducers
 #        data_reducers_q5 = get_data_reducer_docker_services("q5_data_reducer", 1,
