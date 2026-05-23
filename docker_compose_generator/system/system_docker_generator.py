@@ -6,6 +6,7 @@ from .rabbitmq.rabbitmq_docker_service import get_rabbitmq_docker_service
 from .scatter_gather.scatter_gather_generators import get_scatter_gather_services
 from .splitter.splitter_docker_service import get_splitter_docker_services
 
+
 import csv
 import os
 
@@ -27,45 +28,102 @@ def generate_system_docker_compose(total_clients=0):
         # Get config file reader
         config_file_reader = csv.DictReader(config_file)
 
-        # Create gateway
+        # Create gateway (publica en exchange shardeado)
         gateway = get_gateway_docker_services(
-                input_query_queue_prefix="results",
-                total_queries=1,
-                output_queue="gateway_data"
-                )
+            input_query_queue_prefix="results",
+            total_queries=2,
+            output_exchange="gateway_exc",
+        )
+        usd_prefix, usd_instances = _get_next_config_row(config_file_reader)
+        reducer_prefix, reducer_instances = _get_next_config_row(config_file_reader)
+        filter_prefix, filter_instances = _get_next_config_row(config_file_reader)
+
+        q2_splitter_prefix, q2_splitter_instances = _get_next_config_row(config_file_reader)
+        q2_reducer_prefix, q2_reducer_instances = _get_next_config_row(config_file_reader)
+        q2_aggregator_prefix, q2_aggregator_instances = _get_next_config_row(config_file_reader)
+
+        gateway["gateway"]["environment"].append(f"OUTPUT_SHARDS={usd_instances}")
+        gateway["gateway"]["environment"].append(f"QUERY_1_N_UPSTREAM={filter_instances}")
+        gateway["gateway"]["environment"].append(f"QUERY_2_N_UPSTREAM={q2_aggregator_instances}")
+        gateway["gateway"]["environment"].append(
+            "TRANSACTION_COLUMNS=Timestamp,From Bank,Account,To Bank,Account.1,"
+            "Amount Received,Receiving Currency,Amount Paid,Payment Currency,Payment Format"
+        )
         system = system | gateway
 
-        # Create USD filters
-        prefix, total_instances = _get_next_config_row(config_file_reader)
-        usd_filters = get_filters_docker_services(prefix, total_instances,
-                                                "Payment Currency", "US Dollar", "eq",
-                                                input_queue="gateway_data",
-                                                output_queue="usd_transactions",
-                                                total_clients=total_clients,
-                                                )
+        # USD filters
+        usd_filters = get_filters_docker_services(
+            usd_prefix, usd_instances,
+            "Payment Currency", "US Dollar", "eq",
+            input_exchange="gateway_exc",
+            output_exchange="usd_transactions_exc",
+            output_shards=reducer_instances,
+            n_upstream=1,
+            total_clients=total_clients,
+        )
         system = system | usd_filters
 
-
-        # Query 1
-        ## Reduce data
-        prefix, total_instances = _get_next_config_row(config_file_reader)
-        data_reducers_q1 = get_data_reducer_docker_services(prefix, total_instances,
-                                                            ["From Bank", "Account", "To Bank", "Account.1", "Amount Paid"],
-                                                            input_queue="usd_transactions",
-                                                            output_queue="q1_reduced_data",
-                                                            total_clients=total_clients,
-                                                            )
+        # Data reducers
+        data_reducers_q1 = get_data_reducer_docker_services(
+            reducer_prefix, reducer_instances,
+            ["From Bank", "Account", "To Bank", "Account.1", "Amount Paid"],
+            input_exchange="usd_transactions_exc",
+            output_exchange="q1_reduced_exc",
+            output_shards=filter_instances,
+            n_upstream=usd_instances,
+            total_clients=total_clients,
+        )
         system = system | data_reducers_q1
 
-        ## Filter by amount
-        prefix, total_instances = _get_next_config_row(config_file_reader)
-        q1_50_usd_filters = get_filters_docker_services(prefix, total_instances,
-                                                        "Amount Paid", 50, "lt",
-                                                        input_queue="q1_reduced_data",
-                                                        output_queue="results_1",
-                                                        total_clients=total_clients,
-                                                        )
+        # Final amount filter
+        q1_50_usd_filters = get_filters_docker_services(
+            filter_prefix, filter_instances,
+            "Amount Paid", 50, "lt",
+            input_exchange="q1_reduced_exc",
+            output_queue="results_1",
+            n_upstream=reducer_instances,
+            total_clients=total_clients,
+        )
         system = system | q1_50_usd_filters
+
+        # =========================================================
+        # QUERY 2
+        # =========================================================
+
+        q2_splitters = get_splitter_docker_services(
+            q2_splitter_prefix, q2_splitter_instances,
+            input_exchange="usd_transactions_exc",
+            output_exchange="q2_by_bank_exc",
+            key_field="From Bank",
+            output_shards=q2_reducer_instances,
+            n_upstream=usd_instances,
+            total_clients=total_clients,
+        )
+        system = system | q2_splitters
+
+        q2_data_reducers = get_data_reducer_docker_services(
+            q2_reducer_prefix, q2_reducer_instances,
+            ["From Bank", "Account", "Amount Paid"],
+            input_exchange="q2_by_bank_exc",
+            output_exchange="q2_reduced_exc",
+            output_shards=q2_aggregator_instances,
+            n_upstream=q2_splitter_instances,
+            total_clients=total_clients,
+        )
+        for name, config in q2_data_reducers.items():
+            config["environment"].append("ROUTING_FIELD=From Bank")
+        system = system | q2_data_reducers
+
+        q2_aggregators = get_aggregator_docker_services(
+            q2_aggregator_prefix, q2_aggregator_instances,
+            input_exchange="q2_reduced_exc",
+            output_queue="results_2",
+            agg_op="max", agg_field="Amount Paid", key_field="From Bank",
+            carry_fields=["Account"],
+            n_upstream=q2_reducer_instances,
+            total_clients=total_clients,
+        )
+        system = system | q2_aggregators
 
     return system
 #        # Query 2

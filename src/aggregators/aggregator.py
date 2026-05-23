@@ -24,8 +24,9 @@ Ejemplos:
 import logging
 import os
 import sys
-
-from middleware.worker_base import WorkerBase
+sys.path.insert(0, "/app") 
+sys.path.insert(0, "/app/common") 
+from common.middleware.worker_base import WorkerBase
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -42,7 +43,7 @@ class Aggregator(WorkerBase):
             f.strip() for f in os.environ.get("CARRY_FIELDS", "").split(",") if f.strip()
         ]
         self.output_tag   = os.environ.get("OUTPUT_TAG", "")
-        self._state       = {}  # {key: accumulator}
+        self._state       = {}  # ahora será {client_id: {key: accumulator}}
         logger.info(
             f"Aggregator op={self.op} field={self.agg_field} "
             f"key={self.key_field or '(global)'}"
@@ -51,61 +52,79 @@ class Aggregator(WorkerBase):
     def _key(self, data: dict) -> str:
         return str(data.get(self.key_field, "__global__")) if self.key_field else "__global__"
 
+    def _ensure_client_state(self, client_id: str):
+        if client_id not in self._state:
+            self._state[client_id] = {}
+
     def process(self, data: dict) -> list:
+        client_id = data.get("client_id", "__global__")
+        self._ensure_client_state(client_id)
+        state = self._state[client_id]
         k = self._key(data)
 
         if self.op == "max":
             val = float(data.get(self.agg_field, float("-inf")))
-            current = self._state.get(k)
+            current = state.get(k)
             if current is None or val > current["val"]:
-                self._state[k] = {"val": val, "row": data}
+                state[k] = {"val": val, "row": data}
 
         elif self.op == "avg":
             val = float(data.get(self.agg_field, 0))
-            if k not in self._state:
-                self._state[k] = {"sum": 0.0, "count": 0}
-            self._state[k]["sum"]   += val
-            self._state[k]["count"] += 1
+            if k not in state:
+                state[k] = {"sum": 0.0, "count": 0}
+            state[k]["sum"]   += val
+            state[k]["count"] += 1
 
         elif self.op == "sum":
             val = float(data.get(self.agg_field, 0))
-            self._state[k] = self._state.get(k, 0.0) + val
+            state[k] = state.get(k, 0.0) + val
 
         elif self.op == "count":
-            self._state[k] = self._state.get(k, 0) + 1
+            state[k] = state.get(k, 0) + 1
 
         return []
 
     def on_eof(self, client_id=None):
-        count = 0
-        for k, acc in self._state.items():
-            result = {}
-            if self.key_field:
-                result[self.key_field] = k
+        if client_id is None:
+            # EOF global (sin cliente): combina todos los clientes
+            all_results = []
+            for cid, cstate in self._state.items():
+                for k, acc in cstate.items():
+                    all_results.append(self._build_result(k, acc, cid))
+            self._state.clear()
+            yield from all_results
+        else:
+            # EOF de un cliente específico
+            cstate = self._state.pop(client_id, {})
+            for k, acc in cstate.items():
+                yield self._build_result(k, acc, client_id)
 
-            if self.op == "max":
-                result[self.agg_field] = acc["val"]
-                for f in self.carry_fields:
-                    result[f] = acc["row"].get(f)
+    def _build_result(self, key, acc, client_id):
+        result = {}
+        if self.key_field:
+            result[self.key_field] = key
 
-            elif self.op == "avg":
-                avg = acc["sum"] / acc["count"] if acc["count"] else 0.0
-                result[f"avg_{self.agg_field}"] = avg
+        if self.op == "max":
+            result[self.agg_field] = acc["val"]
+            for f in self.carry_fields:
+                result[f] = acc["row"].get(f)
 
-            elif self.op == "sum":
-                result[f"sum_{self.agg_field}"] = acc
+        elif self.op == "avg":
+            avg = acc["sum"] / acc["count"] if acc["count"] else 0.0
+            result[f"avg_{self.agg_field}"] = avg
 
-            elif self.op == "count":
-                result["count"] = acc
+        elif self.op == "sum":
+            result[f"sum_{self.agg_field}"] = acc
 
-            if self.output_tag:
-                result["source"] = self.output_tag
+        elif self.op == "count":
+            result["count"] = acc
 
-            count += 1
-            yield result
+        if self.output_tag:
+            result["source"] = self.output_tag
 
-        logger.info(f"Aggregator {self.op}: {count} claves emitidas")
+        result["client_id"] = client_id  
 
+        return result
 
 if __name__ == "__main__":
     Aggregator().run()

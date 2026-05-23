@@ -1,17 +1,12 @@
 import logging
+import traceback
 import socket
 
 from message_handlers import message_handler
 from common import middleware, message_protocol
-
-
-def _expect_client_ack(client_socket, client_id):
-    msg_type, payload = message_protocol.external.recv_msg(client_socket)
-    if msg_type != message_protocol.external.MsgType.ACK:
-        raise TypeError(f"Expected ACK, got {msg_type}")
-    if payload != client_id:
-        raise ValueError("Client id mismatch in ACK")
-
+import random                         
+import os   
+from common.middleware.middleware_sharded import ShardedExchangeProducer 
 
 def _update_bank_map(bank_maps, client_id, rows):
     bank_map = dict(bank_maps.get(client_id, {}))
@@ -27,9 +22,7 @@ def _rows_to_transactions(client_id, rows, transaction_columns):
     transactions = []
     for row in rows:
         if len(row) != len(transaction_columns):
-            logging.warning(
-                "Transaction row has unexpected length %s", len(row)
-            )
+            logging.warning("Transaction row has unexpected length %s", len(row))
             continue
         transaction = dict(zip(transaction_columns, row))
         transaction["client_id"] = client_id
@@ -37,13 +30,13 @@ def _rows_to_transactions(client_id, rows, transaction_columns):
     return transactions
 
 
-def _build_output_queue(mom_host, output_queue, output_exchange):
-    if output_queue != "":
+from common.middleware.middleware_sharded import ShardedExchangeProducer
+
+def _build_output_queue(mom_host, output_queue, output_exchange, output_shards=1):
+    if output_queue:
         return middleware.MessageMiddlewareQueueRabbitMQ(mom_host, output_queue)
-    if output_exchange != "":
-        return middleware.MessageMiddlewareExchangeRabbitMQ(
-            mom_host, output_exchange, ["gateway_data", "eof"]
-        )
+    if output_exchange:
+        return ShardedExchangeProducer(mom_host, output_exchange, output_shards)
     raise Exception("FATAL: no output given for data processing")
 
 
@@ -57,14 +50,22 @@ def handle_client_request(
     output_exchange,
     transaction_columns,
 ):
-    logging.basicConfig(level=logging.INFO)
-    output = _build_output_queue(mom_host, output_queue, output_exchange)
     handler = message_handler.MessageHandler()
     client_id = None
+    output_shards = int(os.environ.get("OUTPUT_SHARDS", "1"))
+    output = _build_output_queue(mom_host, output_queue, output_exchange, output_shards)
 
     try:
+        client_socket.setblocking(True)
         while True:
-            msg_type, payload = message_protocol.external.recv_msg(client_socket)
+            try:
+                msg_type, payload = message_protocol.external.recv_msg(client_socket)
+            except Exception as e:
+                if client_id is None and "0 bytes" in str(e):
+                    logging.warning("Conexión cerrada sin enviar datos (health probe o timeout del cliente).")
+                    client_socket.close() # Cerramos acá porque el cliente se fue antes de identificarse
+                    return
+                raise e
 
             if msg_type in (
                 message_protocol.external.MsgType.ACCOUNTS_BATCH,
@@ -105,6 +106,8 @@ def handle_client_request(
                 continue
 
             if msg_type == message_protocol.external.MsgType.TRANSACTIONS_BATCH:
+                if output is None:
+                    output = _build_output_queue(mom_host, output_queue, output_exchange)
                 logging.info(f"Received transactions batch from client {client_id}")
                 transactions = _rows_to_transactions(
                     client_id, rows, transaction_columns
@@ -112,7 +115,13 @@ def handle_client_request(
                 serialized_message = handler.serialize_rows_message(
                     client_id, transactions
                 )
-                output.send(serialized_message)
+                
+                if isinstance(output, ShardedExchangeProducer):
+                    shard = random.randint(0, output_shards - 1)
+                    output.send_to_shard(serialized_message, shard)
+                else:
+                    output.send(serialized_message)
+
                 message_protocol.external.send_msg(
                     client_socket,
                     message_protocol.external.MsgType.ACK,
@@ -121,6 +130,8 @@ def handle_client_request(
                 continue
 
             if msg_type == message_protocol.external.MsgType.END_TRANSACTIONS:
+                if output is None:
+                    output = _build_output_queue(mom_host, output_queue, output_exchange)
                 logging.info(f"Received end transactions message from client {client_id}")
                 msg_client_id = payload
                 if client_id is None:
@@ -130,19 +141,25 @@ def handle_client_request(
                 elif msg_client_id != client_id:
                     raise ValueError("Client id mismatch in end transactions")
                 serialized_message = handler.serialize_eof_message(client_id)
-                output.send(serialized_message)
+                if isinstance(output, ShardedExchangeProducer):
+                    output.send_eof_to_all(serialized_message)
+                else:
+                    output.send(serialized_message)
                 message_protocol.external.send_msg(
                     client_socket,
                     message_protocol.external.MsgType.ACK,
                     client_id,
                 )
+                # Avisamos al hilo de resultados que este cliente ya terminó de mandar todo
                 client_ready[client_id] = True
-                return
+                return # RETORNO EXITOSO: NO CERRAMOS EL SOCKET, queda vivo para result_handlers
 
             raise TypeError(f"Unexpected message type: {msg_type}")
-    except socket.error:
-        logging.error("The connection with the client was lost")
     except Exception as e:
-        logging.error(e)
+        logging.error(f"Handler error for client {client_id}: {e}")
+        logging.error(traceback.format_exc())
+        client_socket.close() # Si algo falló catastróficamente en la recepción, sí cerramos el socket
     finally:
-        output.close()
+        if output is not None:
+            output.close()
+        logging.info(f"Terminó la recepción de datos de entrada para el cliente {client_id}.")

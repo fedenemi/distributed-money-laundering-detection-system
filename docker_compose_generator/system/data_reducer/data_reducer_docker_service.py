@@ -32,6 +32,7 @@ TOTAL_CLIENTS_TAG = "TOTAL_CLIENTS"
 def get_data_reducer_docker_services(service_prefix, total_instances, columns_kept,
                                     input_queue=None, input_exchange=None,
                                     output_queue=None, output_exchange=None,
+                                    n_upstream=1, output_shards=1,
                                     total_clients=0):
     base_path = os.path.dirname(__file__)
     config_file_path = os.path.join(base_path, CONFIG_FILE)
@@ -54,18 +55,21 @@ def get_data_reducer_docker_services(service_prefix, total_instances, columns_ke
         new_service_config[DOCKER_BUILD_SECTION_NAME][DOCKER_BUILD_CONTEXT_SUBSECTION_NAME] = CONTEXT_FOLDER
 
         # Add environment variables
+        new_service_config[DOCKER_ENV_VARS_NAME].append(f"{N_UPSTREAM_TAG}={n_upstream}")
+
         ## I/O
         if input_queue is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{INPUT_QUEUE_TAG}={input_queue}")
         elif input_exchange is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{INPUT_EXCHANGE_TAG}={input_exchange}")
-            new_service_config[DOCKER_ENV_VARS_NAME].append(f"{N_UPSTREAM_TAG}={1}")
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{SHARD_ID_TAG}={i}")
 
         if output_queue is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{OUTPUT_QUEUE_TAG}={output_queue}")
         elif output_exchange is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{OUTPUT_EXCHANGE_TAG}={output_exchange}")
+            if output_shards >= 1:
+                new_service_config[DOCKER_ENV_VARS_NAME].append(f"OUTPUT_SHARDS={output_shards}")
         
         # Columns to keep
         keep_columns_value = ",".join(columns_kept)

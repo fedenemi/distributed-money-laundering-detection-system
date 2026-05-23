@@ -30,10 +30,11 @@ FILTER_VALUE_TAG = "FILTER_VALUE"
 TOTAL_CLIENTS_TAG = "TOTAL_CLIENTS"
 
 def get_filters_docker_services(service_prefix, total_instances, filter_field,
-                               filter_value, filter_op="eq",
-                               input_queue=None, input_exchange=None,
-                               output_queue=None, output_exchange=None,
-                               total_clients=0):
+                                filter_value, filter_op="eq",
+                                input_queue=None, input_exchange=None,
+                                output_queue=None, output_exchange=None,
+                                n_upstream=1, output_shards=1,
+                                total_clients=0):
     
     # Open config file
     base_path = os.path.dirname(__file__)
@@ -57,6 +58,8 @@ def get_filters_docker_services(service_prefix, total_instances, filter_field,
         new_service_config[DOCKER_BUILD_SECTION_NAME][DOCKER_BUILD_CONTEXT_SUBSECTION_NAME] = CONTEXT_FOLDER
 
         # Add environment variables
+        new_service_config[DOCKER_ENV_VARS_NAME].append(f"N_UPSTREAM={n_upstream}")
+
         ## I/O
         if input_queue is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{INPUT_QUEUE_TAG}={input_queue}")
@@ -68,6 +71,8 @@ def get_filters_docker_services(service_prefix, total_instances, filter_field,
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{OUTPUT_QUEUE_TAG}={output_queue}")
         elif output_exchange is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{OUTPUT_EXCHANGE_TAG}={output_exchange}")
+            if output_shards >= 1:
+                new_service_config[DOCKER_ENV_VARS_NAME].append(f"OUTPUT_SHARDS={output_shards}")
 
         ## Filter operation
         new_service_config[DOCKER_ENV_VARS_NAME].append(f"{FILTER_FIELD_TAG}={filter_field}")

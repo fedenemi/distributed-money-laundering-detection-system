@@ -4,6 +4,7 @@ import os
 import signal
 import socket
 import time
+import traceback
 
 from common import message_protocol
 
@@ -11,7 +12,10 @@ TRANSACTIONS_FILE = os.environ["TRANSACTIONS_FILE"]
 ACCOUNTS_FILE = os.environ["ACCOUNTS_FILE"]
 SERVER_HOST = os.environ["SERVER_HOST"]
 SERVER_PORT = int(os.environ["SERVER_PORT"])
-CLIENT_ID = os.environ["CLIENT_ID"]
+
+# normalizamos a string
+CLIENT_ID = str(os.environ["CLIENT_ID"])
+
 RESULTS_DIR = os.environ.get("RESULTS_DIR", "/results")
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "1000"))
 
@@ -46,13 +50,15 @@ class Client:
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
                 self.server_socket.connect((self.server_host, self.server_port))
+                logging.info("Connected to gateway")
                 return
-            except socket.error:
+
+            except socket.error as e:
+                logging.warning(f"Gateway not ready, retrying... ({e})")
                 self.server_socket.close()
                 attempts += 1
                 if attempts >= 10:
                     raise
-                logging.warning("Gateway not ready, retrying...")
                 time.sleep(1)
 
     def disconnect(self):
@@ -72,14 +78,28 @@ class Client:
             csvfile.close()
         self._writers = {}
 
+    # ACK con traceback    
     def _expect_ack(self):
-        msg_type, payload = message_protocol.external.recv_msg(self.server_socket)
-        if msg_type != message_protocol.external.MsgType.ACK:
-            raise TypeError(f"Expected ACK, got {msg_type}")
-        if payload != self.client_id:
-            raise ValueError("Client id mismatch in ACK")
-        
-        logging.info("Received ACK from gateway")
+        try:
+            msg_type, payload = message_protocol.external.recv_msg(
+                self.server_socket
+            )
+
+            if msg_type != message_protocol.external.MsgType.ACK:
+                raise TypeError(f"Expected ACK, got {msg_type}")
+
+            if payload != self.client_id:
+                raise ValueError(
+                    f"Client id mismatch in ACK "
+                    f"(got={payload}, expected={self.client_id})"
+                )
+
+            logging.info("Received ACK from gateway")
+
+        except Exception as e:
+            logging.error(f"ACK failure: {e}")
+            logging.error(traceback.format_exc())
+            raise
 
     def _send_rows_in_batches(self, rows, msg_type):
         batch = []

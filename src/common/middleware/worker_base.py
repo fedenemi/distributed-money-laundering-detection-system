@@ -20,9 +20,10 @@ Variables de entorno:
 import json
 import logging
 import os
+import random
 import signal
 import time
-import sys
+import hashlib
 
 from middleware.middleware_rabbitmq import MessageMiddlewareQueueRabbitMQ
 from middleware.middleware_sharded import ShardedExchangeConsumer, ShardedExchangeProducer
@@ -77,7 +78,7 @@ class WorkerBase:
             raise ValueError("Se requiere INPUT_QUEUE o INPUT_EXCHANGE + SHARD_ID")
 
         # Output
-        if self.output_exchange and self.output_shards > 1:
+        if self.output_exchange and self.output_shards >= 1:
             self._producer = ShardedExchangeProducer(RABBITMQ_HOST, self.output_exchange, self.output_shards)
         elif self.output_queue:
             self._producer = MessageMiddlewareQueueRabbitMQ(RABBITMQ_HOST, self.output_queue)
@@ -100,12 +101,19 @@ class WorkerBase:
     def on_eof(self, client_id=None) -> list:
         return []
 
+
     def _routing_key(self, msg: dict) -> str:
-        """Clave de particion del mensaje. Override en Splitter."""
+        if self.output_exchange and self.output_shards >= 1:
+            routing_field = os.environ.get("ROUTING_FIELD")
+            if routing_field and routing_field in msg:
+                val = str(msg[routing_field]).encode()
+                return str(int(hashlib.md5(val).hexdigest(), 16) % self.output_shards)
+            else:
+                return str(random.randint(0, self.output_shards - 1))
         return "__queue__"
 
     def _buffer_key(self, msg: dict) -> str:
-        if self.output_exchange and self.output_shards > 1:
+        if self.output_exchange and self.output_shards >= 1:
             return self._routing_key(msg)
         if isinstance(msg, dict):
             client_id = msg.get("client_id")
@@ -129,7 +137,7 @@ class WorkerBase:
         if not rows:
             return
         body = json.dumps({"rows": rows}).encode()
-        if self.output_exchange and self.output_shards > 1:
+        if self.output_exchange and self.output_shards >= 1:
             self._producer.send_to_shard(body, int(buf_key))
         else:
             self._producer.send(body)
@@ -145,7 +153,7 @@ class WorkerBase:
         if client_id is not None:
             eof_msg["client_id"] = client_id
         eof_body = json.dumps(eof_msg).encode()
-        if self.output_exchange and self.output_shards > 1:
+        if self.output_exchange and self.output_shards >= 1:
             self._producer.send_eof_to_all(eof_body)
         else:
             self._producer.send(eof_body)
@@ -188,10 +196,9 @@ class WorkerBase:
                         self._consumer.stop_consuming()
                         logger.info(f"{self.__class__.__name__} terminado")
                     return
-                else:
-                    for row in msg.get("rows", []):
-                        self._emit(self.process(row))
-                    ack()
+                for row in msg.get("rows", []):
+                    self._emit(self.process(row))
+                ack()
             except Exception as e:
                 logger.error(f"Error procesando mensaje: {e}")
                 nack()
@@ -201,3 +208,5 @@ class WorkerBase:
         except MessageMiddlewareDisconnectedError:
             if self._running:
                 logger.error("Conexion perdida con RabbitMQ")
+        except Exception as e:
+            logger.error(f"Error inesperado en {self.__class__.__name__}: {e}")
