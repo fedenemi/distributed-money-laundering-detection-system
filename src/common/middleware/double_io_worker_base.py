@@ -10,17 +10,19 @@ Variables de entorno:
   RABBITMQ_HOST: host de RabbitMQ (default: rabbitmq)
   MAIN_INPUT_QUEUE: cola de entrada principal (si consume de cola simple)
   MAIN_INPUT_EXCHANGE: exchange de entrada principal (si consume de shard)
-  SECONDARU_INPUT_QUEUE: cola de entrada secundaria (si consume de cola simple)
-  SECONDARU_INPUT_EXCHANGE: exchange de entrada secundaria (si consume de shard)
+  SECONDARY_INPUT_QUEUE: cola de entrada secundaria (si consume de cola simple)
+  SECONDARY_INPUT_EXCHANGE: exchange de entrada secundaria (si consume de shard)
   SHARD_ID        : id del shard de este worker
   N_UPSTREAM_MAIN : cantidad de EOFs a esperar de la entrada principal
   N_UPSTREAM_SECONDARY : cantidad de EOFs a esperar de la entrada secundaria
-  OUTPUT_QUEUE    : cola de salida simple principal
-  OUTPUT_QUEUE    : cola de salida simple secundaria
+  MAIN_OUTPUT_QUEUE    : cola de salida simple principal
+  MAIN_OUTPUT_QUEUE    : cola de salida simple secundaria
   MAIN_OUTPUT_EXCHANGE : exchange de salida con sharding principal
   SECONDARY_OUTPUT_EXCHANGE : exchange de salida con sharding secundaria
   OUTPUT_SHARDS   : cantidad de shards de salida (default 1)
   BATCH_SIZE      : filas por batch de salida (default 500)
+  OP_MODE           : Modo de operación del worker. JOINER si se quiere que se use como joiner de
+                        de dos entradas o PIPELINE si se quieren realizar acciones en 
 """
 import json
 import logging
@@ -142,7 +144,7 @@ class WorkerBase:
     def process_main_input(self, data: dict) -> tuple[list, list]:
         raise NotImplementedError
 
-    def process_secondary_input(self, data: dict) -> tuple[list, list]:
+    def process_secondary_input(self, data: dict, prev_stage_data: dict) -> tuple[list, list]:
         raise NotImplementedError
 
     def on_main_input_eof(self, client_id=None) -> list:
@@ -244,6 +246,18 @@ class WorkerBase:
             self._main_producer.send_eof_to_all(eof_body)
         else:
             self._main_producer.send(eof_body)
+    
+    def _send_sec_output_eof(self, client_id=None):
+        if self._producer is None:
+            return
+        eof_msg = {"type": "eof"}
+        if client_id is not None:
+            eof_msg["client_id"] = client_id
+        eof_body = json.dumps(eof_msg).encode()
+        if self.sec_output_exchange and self.sec_output_shards > 1:
+            self._sec_producer.send_eof_to_all(eof_body)
+        else:
+            self._sec_producer.send(eof_body)
 
     # --- Loop principal ---------------------------------------------------------
 
@@ -323,14 +337,31 @@ class WorkerBase:
 
                     self._clients_eof_sec_input[client_id] = self._clients_eof_sec_input.get(client_id, 0) + 1
                     ack()
-                    if self._clients_eof_sec_input[client_id] >= self.n_upstream:
-                        for result in self.on_eof(client_id):
-                            self._emit([result])
-                        self._flush_all()
-                        self._send_eof(client_id)
+                    # For pipeline, send data to next workers
+                    if self._operation_mode == "PIPELINE":
+                        if self._clients_eof_sec_input[client_id] >= self.sec_n_upstream:
+                            for result in self.on_secondary_input_eof(client_id):
+                                self._emit_sec_output([result])
+                            self._flush_all_sec_buffer()
+                            self._send_sec_output_eof(client_id)
+                    else: # For joiner, check if joiner action is necessary
+                        if self._clients_eof_sec_input[client_id] >= self.sec_n_upstream and \
+                                self._clients_eof_main_input[client_id] >= self.main_n_upstream:
+                            for result in self.on_both_eof_received(client_id):
+                                self._emit_main_output([result])
+                            self._flush_all_main_buffer()
+                            self._send_main_output_eof(client_id)
+                        return
+
+
                 else:
                     for row in msg.get("rows", []):
-                        self._emit(self.process(row))
+                        if self._operation_mode == "PIPELINE":
+                            prev_stage_data = self._channel_stages.get()
+                            self._emit_sec_output(self.process_secondary_input(row, prev_stage_data))
+                        else:
+                            prev_stage_data = self._channel_stages.get()
+                            self.process_secondary_input(row, prev_stage_data)
                     ack()
             except Exception as e:
                 logger.error(f"Error procesando mensaje: {e}")
@@ -346,18 +377,11 @@ class WorkerBase:
     def run(self):
         logger.info(f"{self.__class__.__name__} iniciando")
 
-        with multiprocessing.Manager() as manager:
-            client_sockets = manager.dict()
-            bank_maps = manager.dict()
-            client_query_eofs = manager.dict()
-            client_ready = manager.dict()
-            send_lock = manager.Lock()
+        with multiprocessing.Pool(processes=os.cpu_count()) as processes_pool:
+            processes_pool.apply_async(
+                self.handle_message_main_input, (),
+            )
 
-            with multiprocessing.Pool(processes=os.cpu_count()) as processes_pool:
-                processes_pool.apply_async(
-                    self.handle_message_main_input, (),
-                )
-
-                processes_pool.apply_async(
-                    self.handle_message_sec_input, (),
-                )
+            processes_pool.apply_async(
+                self.handle_message_sec_input, (),
+            )
