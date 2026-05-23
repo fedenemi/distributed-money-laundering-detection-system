@@ -87,7 +87,7 @@ class MoneyConverter(WorkerBaseDoubleIO):
                 new_data_list.append(prev_stage_data_row)
                 self._current_prev_row_analyzed += 1
 
-        return new_data_list
+        return ([], new_data_list)
 
     def on_eof(self):
         return []

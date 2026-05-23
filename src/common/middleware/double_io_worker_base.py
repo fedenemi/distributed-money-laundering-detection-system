@@ -145,7 +145,7 @@ class WorkerBaseDoubleIO:
     def process_main_input(self, data: dict) -> tuple[list, list]:
         raise NotImplementedError
 
-    def process_secondary_input(self, data: dict, prev_stage_data: list) -> list:
+    def process_secondary_input(self, data: dict, prev_stage_data: list) -> tuple[list, list]:
         raise NotImplementedError
 
     def on_main_input_eof(self, client_id=None) -> list:
@@ -357,10 +357,9 @@ class WorkerBaseDoubleIO:
                     for row in msg.get("rows", []):
                         if self._operation_mode == "PIPELINE":
                             prev_stage_data = self._channel_stages.get()
-                            self._emit_sec_output(self.process_secondary_input(row, prev_stage_data))
+                            self._emit_sec_output(self.process_secondary_input(row, prev_stage_data)[1])
                         else:
-                            prev_stage_data = self._channel_stages.get()
-                            self.process_secondary_input(row, prev_stage_data)
+                            self.process_secondary_input(row, None)
                     ack()
             except Exception as e:
                 logger.error(f"Error procesando mensaje: {e}")
