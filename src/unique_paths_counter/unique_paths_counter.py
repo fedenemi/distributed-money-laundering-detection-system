@@ -34,18 +34,18 @@ class UniquePathsCounter(WorkerBase):
 
         # Path start
         start_node = transaction_id.TransactionID(
-                        transaction[TRANSACTION_ORIGIN_BANK_KEY],
-                        transaction[TRANSACTION_ORIGIN_ACC_KEY])
+                        data[TRANSACTION_ORIGIN_BANK_KEY],
+                        data[TRANSACTION_ORIGIN_ACC_KEY])
 
         # Path intermediate node
         intermediate_node = transaction_id.TransactionID(
-                            transaction[TRANSACTION_INTERMEDIATE_BANK_KEY],
-                            transaction[TRANSACTION_INTERMEDIATE_ACC_KEY])
+                            data[TRANSACTION_INTERMEDIATE_BANK_KEY],
+                            data[TRANSACTION_INTERMEDIATE_ACC_KEY])
 
         # Path end
         end_node = transaction_id.TransactionID(
-                        transaction[TRANSACTION_DESTINATION_BANK_KEY],
-                        transaction[TRANSACTION_DESTINATION_ACC_KEY])
+                        data[TRANSACTION_DESTINATION_BANK_KEY],
+                        data[TRANSACTION_DESTINATION_ACC_KEY])
 
         # Add intermediate node
         intermediate_accs_set = intermediate_nodes.get((start_node, end_node), set())

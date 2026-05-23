@@ -33,16 +33,16 @@ class PathsCreator(WorkerBase):
 
         # Transaction origin
         origin = transaction_id.TransactionID(
-                            transaction[TRANSACTION_ORIGIN_BANK_KEY],
-                            transaction[TRANSACTION_ORIGIN_ACC_KEY])
+                            data[TRANSACTION_ORIGIN_BANK_KEY],
+                            data[TRANSACTION_ORIGIN_ACC_KEY])
 
         # Transaction destination
         destination = transaction_id.TransactionID(
-                            transaction[TRANSACTION_DESTINATION_BANK_KEY],
-                            transaction[TRANSACTION_DESTINATION_ACC_KEY])
+                            data[TRANSACTION_DESTINATION_BANK_KEY],
+                            data[TRANSACTION_DESTINATION_ACC_KEY])
 
         # Get tag of edge
-        tag = transaction[EDGE_TAG_KEY]
+        tag = data[EDGE_TAG_KEY]
 
         # Store according if it is an "incoming" edge, where the destination node is stored here,
         # or if it is an "outgoing" edge, where the origin node is stored here

@@ -32,14 +32,14 @@ class TransactionsGraphAgg(WorkerBase):
 
         # Get origin account
         origin = transaction_id.TransactionID(
-                    transaction[TRANSACTION_ORIGIN_BANK_KEY],
-                    transaction[TRANSACTION_ORIGIN_ACC_KEY]
+                    data[TRANSACTION_ORIGIN_BANK_KEY],
+                    data[TRANSACTION_ORIGIN_ACC_KEY]
                     )
         
         # Get destination account
         destination = transaction_id.TransactionID(
-                    transaction[TRANSACTION_DESTINATION_BANK_KEY],
-                    transaction[TRANSACTION_DESTINATION_ACC_KEY]
+                    data[TRANSACTION_DESTINATION_BANK_KEY],
+                    data[TRANSACTION_DESTINATION_ACC_KEY]
                     )
 
         # Check if edge already exists
