@@ -34,29 +34,38 @@ def _extract_client_id(message, rows, client_sockets):
 def _normalize_result_rows(rows, query_id, bank_maps, client_id):
     normalized = []
     for row in rows:
-        if isinstance(row, dict) and query_id == 2:
-            bank_id = row.get("From Bank")
+        if not isinstance(row, dict):
+            continue
+
+        # Mapeo de columnas según la query
+        if query_id == 1:
+            # Q1: from_bank, from_account, to_bank, to_account, amount
+            mapped = {
+                "from_bank": row.get("From Bank", ""),
+                "from_account": row.get("Account", ""),
+                "to_bank": row.get("To Bank", ""),
+                "to_account": row.get("Account.1", ""),
+                "amount": row.get("Amount Paid", 0),
+            }
+        elif query_id == 2:
+            # Q2: bank_name, from_account, amount
+            bank_id = row.get("From Bank", "")
             bank_map = bank_maps.get(client_id, {})
-            row = dict(row)
-            row[ACCOUNT_BANK_NAME_COL] = bank_map.get(bank_id, "")
-
-        if isinstance(row, dict) and "client_id" in row:
-            row = dict(row)
-            row.pop("client_id", None)
-
-        if isinstance(row, dict) and "client_id" in row:
-            if row["client_id"] != client_id:
-                logging.warning(
-                    f"Row client_id {row['client_id']} does not match expected client_id {client_id}"
-                )
-
-        if isinstance(row, dict):
-            row_values = list(row.values())
+            bank_name = bank_map.get(bank_id, bank_id)
+            mapped = {
+                "bank_name": bank_name,
+                "from_account": row.get("Account", ""),
+                "amount": row.get("Amount Paid", 0),
+            }
         else:
-            row_values = list(row)
-        normalized.append([str(value) for value in row_values])
-    return normalized
+            # Para queries aún no implementadas, pasamos las claves originales (quitando client_id)
+            mapped = {k: v for k, v in row.items() if k != "client_id"}
 
+        # Convertimos los valores a string y los ponemos en una lista 
+        row_values = [str(mapped[key]) for key in mapped]
+        normalized.append(row_values)
+
+    return normalized
 
 def _handle_query_eof(
     client_id,

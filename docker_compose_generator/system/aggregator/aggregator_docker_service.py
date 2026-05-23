@@ -1,18 +1,17 @@
 import yaml
 import copy
+import os
 
 # Config file
-CONFIG_FILE = "aggregator_config.yaml"
+BASE_DIR = os.path.dirname(__file__)
+CONFIG_FILE = os.path.join(BASE_DIR, "aggregator_config.yaml")
 
 # Build section
 DOCKER_BUILD_SECTION_NAME = "build"
 DOCKER_BUILD_CONTEXT_SUBSECTION_NAME = "context"
 
-CONTEXT_FOLDER = "./src/aggregator"
-
 # Container name
 CONTAINER_NAME_TAG = "container_name"
-
 # Environment variable names
 DOCKER_ENV_VARS_NAME = "environment"
 
@@ -38,7 +37,7 @@ def get_aggregator_docker_services(service_prefix, total_instances,
                                output_queue=None, output_exchange=None,
                                agg_op="count", agg_field=None, key_field=None,
                                carry_fields=None, output_tag=None,
-                               total_clients=0):
+                               n_upstream=None, total_clients=0):
     
     # Open config file
     with open(CONFIG_FILE, "r") as config_file:
@@ -56,7 +55,8 @@ def get_aggregator_docker_services(service_prefix, total_instances,
         new_service_config[CONTAINER_NAME_TAG] = new_service_name
 
         # Add context folder
-        new_service_config[DOCKER_BUILD_SECTION_NAME][DOCKER_BUILD_CONTEXT_SUBSECTION_NAME] = CONTEXT_FOLDER
+        new_service_config[DOCKER_BUILD_SECTION_NAME][DOCKER_BUILD_CONTEXT_SUBSECTION_NAME] = "./src"
+        new_service_config[DOCKER_BUILD_SECTION_NAME]["dockerfile"] = "aggregators/Dockerfile"
 
         # Add environment variables
         ## I/O
@@ -64,8 +64,10 @@ def get_aggregator_docker_services(service_prefix, total_instances,
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{INPUT_QUEUE_TAG}={input_queue}")
         elif input_exchange is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{INPUT_EXCHANGE_TAG}={input_exchange}")
-            new_service_config[DOCKER_ENV_VARS_NAME].append(f"{N_UPSTREAM_TAG}={1}")
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{SHARD_ID_TAG}={i}")
+            
+        if n_upstream is not None:
+            new_service_config[DOCKER_ENV_VARS_NAME].append(f"{N_UPSTREAM_TAG}={n_upstream}")
 
         if output_queue is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{OUTPUT_QUEUE_TAG}={output_queue}")
@@ -80,9 +82,7 @@ def get_aggregator_docker_services(service_prefix, total_instances,
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{KEY_FIELD_TAG}={key_field}")
         if carry_fields is not None:
             carry_fields_value = ",".join(carry_fields)
-            new_service_config[DOCKER_ENV_VARS_NAME].append(
-                f"{CARRY_FIELDS_TAG}={carry_fields_value}"
-            )
+            new_service_config[DOCKER_ENV_VARS_NAME].append(f"{CARRY_FIELDS_TAG}={carry_fields_value}")
         if output_tag is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{OUTPUT_TAG_TAG}={output_tag}")
 

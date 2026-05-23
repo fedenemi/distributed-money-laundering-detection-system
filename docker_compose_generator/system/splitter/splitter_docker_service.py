@@ -1,14 +1,13 @@
 import yaml
 import copy
+import os
 
-# Config file
-CONFIG_FILE = "splitter_config.yaml"
+BASE_DIR = os.path.dirname(__file__)
+CONFIG_FILE = os.path.join(BASE_DIR, "splitter_config.yaml")
 
 # Build section
 DOCKER_BUILD_SECTION_NAME = "build"
 DOCKER_BUILD_CONTEXT_SUBSECTION_NAME = "context"
-
-CONTEXT_FOLDER = "./src/splitter"
 
 # Container name
 CONTAINER_NAME_TAG = "container_name"
@@ -33,8 +32,8 @@ def get_splitter_docker_services(service_prefix, total_instances,
                                input_queue=None, input_exchange=None,
                                output_queue=None, output_exchange=None,
                                key_field=None, key_fields=None,
-                               source_tag=None,
-                               total_clients=0):
+                               source_tag=None, output_shards=None,
+                               n_upstream=None, total_clients=0):
     
     # Open config file
     with open(CONFIG_FILE, "r") as config_file:
@@ -52,7 +51,9 @@ def get_splitter_docker_services(service_prefix, total_instances,
         new_service_config[CONTAINER_NAME_TAG] = new_service_name
 
         # Add context folder
-        new_service_config[DOCKER_BUILD_SECTION_NAME][DOCKER_BUILD_CONTEXT_SUBSECTION_NAME] = CONTEXT_FOLDER
+        new_service_config[DOCKER_BUILD_SECTION_NAME][DOCKER_BUILD_CONTEXT_SUBSECTION_NAME] = "./src"
+        new_service_config[DOCKER_BUILD_SECTION_NAME]["dockerfile"] = "aggregators/Dockerfile"
+        new_service_config["entrypoint"] = ["python3", "/app/splitter.py"]
 
         # Add environment variables
         ## I/O
@@ -60,20 +61,24 @@ def get_splitter_docker_services(service_prefix, total_instances,
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{INPUT_QUEUE_TAG}={input_queue}")
         elif input_exchange is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{INPUT_EXCHANGE_TAG}={input_exchange}")
+            new_service_config[DOCKER_ENV_VARS_NAME].append(f"SHARD_ID={i}")
 
         if output_queue is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{OUTPUT_QUEUE_TAG}={output_queue}")
         elif output_exchange is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{OUTPUT_EXCHANGE_TAG}={output_exchange}")
 
+        if n_upstream is not None:
+            new_service_config[DOCKER_ENV_VARS_NAME].append(f"N_UPSTREAM={n_upstream}")
+        if output_shards is not None:
+            new_service_config[DOCKER_ENV_VARS_NAME].append(f"OUTPUT_SHARDS={output_shards}")
+
         ## Aggregation operation
         if key_field is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{SHARD_KEY_FIELD_TAG}={key_field}")
         elif key_fields is not None:
             shard_key_fields_value = ",".join(key_fields)
-            new_service_config[DOCKER_ENV_VARS_NAME].append(
-                f"{SHARD_KEY_FIELDS_TAG}={shard_key_fields_value}"
-            )
+            new_service_config[DOCKER_ENV_VARS_NAME].append(f"{SHARD_KEY_FIELDS_TAG}={shard_key_fields_value}")
 
         if source_tag is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{TAG_SOURCE_TAG}={source_tag}")

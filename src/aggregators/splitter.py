@@ -10,8 +10,10 @@ Variables de entorno:
 """
 import logging
 import os
+import hashlib
 
-from middleware.worker_base import WorkerBase
+
+from common.middleware.worker_base import WorkerBase
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -35,7 +37,8 @@ class Splitter(WorkerBase):
         return "".join(str(msg.get(f, "")) for f in self._key_fields)
 
     def _routing_key(self, msg: dict) -> str:
-        shard = hash(self._shard_key(msg)) % self.output_shards
+        key = self._shard_key(msg).encode()
+        shard = int(hashlib.md5(key).hexdigest(), 16) % self.output_shards
         return str(shard)
 
     def process(self, data: dict) -> list:

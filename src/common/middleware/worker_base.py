@@ -23,6 +23,7 @@ import os
 import random
 import signal
 import time
+import hashlib
 
 from middleware.middleware_rabbitmq import MessageMiddlewareQueueRabbitMQ
 from middleware.middleware_sharded import ShardedExchangeConsumer, ShardedExchangeProducer
@@ -100,16 +101,15 @@ class WorkerBase:
     def on_eof(self, client_id=None) -> list:
         return []
 
+
     def _routing_key(self, msg: dict) -> str:
         if self.output_exchange and self.output_shards >= 1:
             routing_field = os.environ.get("ROUTING_FIELD")
             if routing_field and routing_field in msg:
-                val = msg[routing_field]
-                return str(hash(str(val)) % self.output_shards)
+                val = str(msg[routing_field]).encode()
+                return str(int(hashlib.md5(val).hexdigest(), 16) % self.output_shards)
             else:
-                # Hash random puro para balanceo de carga stateless en cada etapa
                 return str(random.randint(0, self.output_shards - 1))
-
         return "__queue__"
 
     def _buffer_key(self, msg: dict) -> str:
