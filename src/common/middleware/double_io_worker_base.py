@@ -29,6 +29,7 @@ import signal
 import time
 import sys
 import multiprocessing
+import queue
 
 from middleware.middleware_rabbitmq import MessageMiddlewareQueueRabbitMQ
 from middleware.middleware_sharded import ShardedExchangeConsumer, ShardedExchangeProducer
@@ -78,6 +79,10 @@ class WorkerBase:
 
         # Configuration
         self._operation_mode = os.environ["OP_MODE"]
+        self._channel_stages = queue.Queue()
+        self._results_buffer_next_stage = []
+        self._clients_eof_main_input = {}
+        self._clients_eof_sec_input = {}
         self._running = True
 
         signal.signal(signal.SIGTERM, self._handle_sigterm)
@@ -164,9 +169,19 @@ class WorkerBase:
 
     # --- Emisión con Buffer y flush --------------------------------------------------------
 
-    def _emit(self, results: tuple[list, list]):
+    def _send_data_batch_to_next_stage(self):
+        new_data_batch = self._results_buffer_next_stage
+        self._channel_stages.put(new_data_batch)
+
+    def _send_data_to_next_stage(self, results: list):
+        for res in results:
+            self._results_buffer_next_stage.append(res)
+            if len(self._results_buffer_next_stage) >= self.batch_size:
+                self._send_data_batch_to_next_stage()
+
+    def _emit_results_main_stage(self, results: tuple[list, list]):
         self._emit_main_output(results[0])
-        self._emit_sec_output(results[1])
+        self._send_data_to_next_stage(results[1])
 
     def _emit_main_output(self, results: list):
         if not results or self._main_producer is None:
@@ -206,28 +221,34 @@ class WorkerBase:
         else:
             self._sec_producer.send(body)
 
-    def _flush_all(self):
-        for key in list(self._buffer.keys()):
-            self._flush_key(key)
+    def _flush_all_main_buffer(self):
+        for key in list(self._main_out_buffer.keys()):
+            self._flush_main_buffer_key(key)
+    
+    def _flush_all_sec_buffer(self):
+        for key in list(self._sec_out_buffer.keys()):
+            self._flush_sec_buffer_key(key)
 
-    def _send_eof(self, client_id=None):
+    def _flush_all_next_stage(self):
+        self._flush_all_main_buffer()
+        self._send_data_batch_to_next_stage()
+
+    def _send_main_output_eof(self, client_id=None):
         if self._producer is None:
             return
         eof_msg = {"type": "eof"}
         if client_id is not None:
             eof_msg["client_id"] = client_id
         eof_body = json.dumps(eof_msg).encode()
-        if self.output_exchange and self.output_shards > 1:
-            self._producer.send_eof_to_all(eof_body)
+        if self.main_output_exchange and self.main_output_shards > 1:
+            self._main_producer.send_eof_to_all(eof_body)
         else:
-            self._producer.send(eof_body)
+            self._main_producer.send(eof_body)
 
     # --- Loop principal ---------------------------------------------------------
 
     def handle_message_main_input(self):
         eof_count = [0]
-        eof_per_client = {}
-        done_clients = set()
 
         def on_message(body: bytes, ack, nack):
             try:
@@ -237,28 +258,33 @@ class WorkerBase:
                     if client_id is None:
                         eof_count[0] += 1
                         ack()
-                        if eof_count[0] >= self.n_upstream:
+                        if eof_count[0] >= self.main_n_upstream:
                             for result in self.on_eof(None):
-                                self._emit([result])
+                                self._emit_results_main_stage([result])
                             self._flush_all()
                             self._send_eof()
                             self._main_consumer.stop_consuming()
                             logger.info(f"{self.__class__.__name__} terminado")
                         return
 
-                    eof_per_client[client_id] = eof_per_client.get(client_id, 0) + 1
+                    self._clients_eof_main_input[client_id] = self._clients_eof_main_input.get(client_id, 0) + 1
                     ack()
-                    if eof_per_client[client_id] >= self.main_n_upstream and client_id not in done_clients:
-                        for result in self.on_eof(client_id):
-                            self._emit([result])
-                        self._flush_all()
-                        self._send_eof(client_id)
-                        done_clients.add(client_id)
+                    # For pipeline send data to the next stage
+                    if self._operation_mode == "PIPELINE":
+                        if self._clients_eof_main_input[client_id] >= self.main_n_upstream:
+                            for result in self.on_main_input_eof(client_id):
+                                self._emit_results_main_stage([result])
+                            self._flush_all_next_stage()
+                        return
+                    else: #For joiner, check if joiner action is necessary
+                        if self._clients_eof_main_input[client_id] >= self.main_n_upstream and \
+                                self._clients_eof_sec_input[client_id] >= self.sec_n_upstream:
+                            for result in self.on_both_eof_received(client_id):
+                                self._emit_main_output([result])
+                            self._flush_all_main_buffer()
+                            self._send_main_output_eof(client_id)
+                        return
 
-                    if self.total_clients > 0 and len(done_clients) >= self.total_clients:
-                        self._main_consumer.stop_consuming()
-                        logger.info(f"{self.__class__.__name__} terminado")
-                    return
                 else:
                     for row in msg.get("rows", []):
                         self._emit(self.process_main_input(row))
