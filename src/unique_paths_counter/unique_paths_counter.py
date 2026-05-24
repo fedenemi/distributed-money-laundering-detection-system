@@ -29,6 +29,7 @@ class UniquePathsCounter(WorkerBase):
     # Process data message
     def process(self, data):
         # Get paths counter
+        logging.info("Leo nuevo camino")
         client_id = data["client_id"]
         intermediate_nodes = self.edges_by_client_id.get(client_id, {})
 
@@ -51,7 +52,6 @@ class UniquePathsCounter(WorkerBase):
         intermediate_accs_set = intermediate_nodes.get((start_node, end_node), set())
         intermediate_accs_set.add(intermediate_node)
 
-        logging.info("Batch de datos procesado")
         return []
 
 

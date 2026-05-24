@@ -25,6 +25,7 @@ class PathsCreator(WorkerBase):
 
     # Process data message
     def process(self, data):
+        logging.info("Arista recibida")
         # Get edge's dictionaries of according to client ID
         client_id = data["client_id"]
         edges_pair = self.edges_by_client_id.get(client_id, ({}, {}))
@@ -50,10 +51,12 @@ class PathsCreator(WorkerBase):
             if destination not in incoming_edges:
                 incoming_edges[destination] = set()
             incoming_edges[destination].add(origin)
+            logging.info("Arista de entrada guardada")
         else:
             if origin not in outgoing_edges:
                 outgoing_edges[origin] = set()
             outgoing_edges[origin].add(destination)
+            logging.info("Arista de salida guardada")
 
         return []
 

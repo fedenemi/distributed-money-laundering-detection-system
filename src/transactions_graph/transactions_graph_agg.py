@@ -26,6 +26,7 @@ class TransactionsGraphAgg(WorkerBase):
 
     # Process data message
     def process(self, data):
+        logging.info("Nueva transacción obtenida")
         # Get client ID
         client_id = data["client_id"]
         client_graph : DirectedGraph = self.graph_by_client_id.get(client_id, DirectedGraph())
@@ -44,6 +45,7 @@ class TransactionsGraphAgg(WorkerBase):
 
         # Check if edge already exists
         if client_graph.are_connected(origin, destination):
+            logging.info("Genero nuevas aristas")
             # Add nodes and edge
             client_graph.add_node(origin)
             client_graph.add_node(destination)
@@ -70,6 +72,7 @@ class TransactionsGraphAgg(WorkerBase):
 
     # Process EOF
     def on_eof(self, client_id=None):
+        logging.info("Llega EOF")
         return []
 
     def _routing_key(self, msg: dict) -> str:

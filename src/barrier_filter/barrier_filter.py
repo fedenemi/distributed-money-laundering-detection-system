@@ -15,6 +15,12 @@ class BarrierFilter(WorkerBaseDoubleIO):
         self._transactions_by_client = manager.dict()
         self._comparison_values_by_client = manager.dict()
 
+    def _get_transactions_temporal_storage(self):
+        pass
+
+    def _store_transaction(self, data):
+        pass
+
     def process_main_input(self, data):
         logging.info(f"Nueva transacción recibida")
         client_id = data["client_id"]
