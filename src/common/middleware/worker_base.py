@@ -173,7 +173,6 @@ class WorkerBase:
                     client_id = msg.get("client_id")
                     if client_id is None:
                         eof_count[0] += 1
-                        ack()
                         if eof_count[0] >= self.n_upstream:
                             for result in self.on_eof(None):
                                 self._emit([result])
@@ -181,10 +180,10 @@ class WorkerBase:
                             self._send_eof()
                             self._consumer.stop_consuming()
                             logger.info(f"{self.__class__.__name__} terminado")
+                        ack()
                         return
 
                     eof_per_client[client_id] = eof_per_client.get(client_id, 0) + 1
-                    ack()
                     if eof_per_client[client_id] >= self.n_upstream and client_id not in done_clients:
                         for result in self.on_eof(client_id):
                             self._emit([result])
@@ -195,6 +194,7 @@ class WorkerBase:
                     if self.total_clients > 0 and len(done_clients) >= self.total_clients:
                         self._consumer.stop_consuming()
                         logger.info(f"{self.__class__.__name__} terminado")
+                    ack()
                     return
                 for row in msg.get("rows", []):
                     self._emit(self.process(row))
