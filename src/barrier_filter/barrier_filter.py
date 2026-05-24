@@ -1,47 +1,61 @@
 from common.middleware.double_io_worker_base import WorkerBaseDoubleIO
 
 import logging
+import multiprocessing
 import os
 
 class BarrierFilter(WorkerBaseDoubleIO):
     def __init__(self):
         super().__init__()
         # Environment variables
-        self._coeficient_comparison_value = os.environ["COEF"]
+        self._coeficient_comparison_value = float(os.environ["COEF"])
 
         # Initial state
-        self._transactions_by_client = {}
-        self._comparison_values_by_client = {}
+        manager = multiprocessing.Manager()
+        self._transactions_by_client = manager.dict()
+        self._comparison_values_by_client = manager.dict()
 
     def process_main_input(self, data):
+        logging.info(f"Nueva transacción recibida")
         client_id = data["client_id"]
-        stored_transactions = self._transactions_by_client.setdefault(client_id, [])
-        stored_transactions.append(data.copy())
+        stored_transactions = self._transactions_by_client.get(client_id, [])
+        stored_transactions.append(data)
+        self._transactions_by_client[client_id] = stored_transactions
         return ([], [])
 
     def process_secondary_input(self, data, prev_stage_data):
+        logging.info(f"Nuevo promedio recibido")
+        # Getting values
         client_id = data["client_id"]
-        comparison_values = data["values"]
-        new_stored_comparison_values = {}
-        for method in comparison_values:
-            value = float(comparison_values[method])
-            new_stored_comparison_values[method] = self._coeficient_comparison_value * value
-        self._comparison_values_by_client[client_id] = new_stored_comparison_values
+        payment_format = data["Payment Format"]
+        avg_value = float(data["avg_Amount Paid"])
+
+        # Calculating values
+        threshold = avg_value * self._coeficient_comparison_value
+        client_values = self._comparison_values_by_client.get(client_id, {})
+        client_values[payment_format] = threshold
+        self._comparison_values_by_client[client_id] = client_values
+
+        logging.info(f"Promedio guardado")
         return ([], [])
 
     def on_both_eof_received(self, client_id=None):
-        transactions = self._transactions_by_client[client_id]
-        comparison_values = self._comparison_values_by_client[client_id]
+        logging.info(f"Ambos EOF recibidos")
+        transactions = self._transactions_by_client.get(client_id, [])
+        comparison_values = self._comparison_values_by_client.get(client_id, {})
 
         for transaction in transactions:
             payment_method = transaction["Payment Method"]
 
-            if transaction["Amount Paid"] < comparison_values[payment_method]:
-                yield {
-                    transaction["From Bank"],
-                    transaction["Account"],
-                    transaction["Amount Paid"]
-                }
+            if payment_method in comparison_values:
+                if transaction["Amount Paid"] < comparison_values[payment_method]:
+                    yield {
+                        "From Bank": transaction["From Bank"],
+                        "Account": transaction["Account"],
+                        "Amount Paid": transaction["Amount Paid"]
+                    }
+
+        logging.info(f"Todas las transacciones enviadas")
 
 
 if __name__ == "__main__":

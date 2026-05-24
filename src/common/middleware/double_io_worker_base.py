@@ -30,9 +30,7 @@ import logging
 import os
 import signal
 import time
-import sys
 import multiprocessing
-import queue
 
 from common.middleware.middleware_rabbitmq import MessageMiddlewareQueueRabbitMQ
 from common.middleware.middleware_sharded import ShardedExchangeConsumer, ShardedExchangeProducer
@@ -59,86 +57,34 @@ def _wait_for_rabbitmq():
 class WorkerBaseDoubleIO:
 
     def __init__(self):
-        # Input
-        self.main_input_queue     = os.environ.get("MAIN_INPUT_QUEUE", "")
-        self.main_input_exchange  = os.environ.get("MAIN_INPUT_EXCHANGE", "")
-        self.sec_input_queue     = os.environ.get("SECONDARY_INPUT_QUEUE", "")
-        self.sec_input_exchange  = os.environ.get("SECONDARY_INPUT_EXCHANGE", "")
-        self.shard_id        = int(os.environ.get("SHARD_ID", "-1"))
-        self.main_n_upstream      = int(os.environ.get("MAIN_N_UPSTREAM", "1"))
-        self.sec_n_upstream      = int(os.environ.get("SECONDARY_N_UPSTREAM", "1"))
-        
-        # Output
-        self.main_output_queue    = os.environ.get("MAIN_OUTPUT_QUEUE", "")
-        self.main_output_exchange = os.environ.get("MAIN_OUTPUT_EXCHANGE", "")
-        self.main_output_shards   = int(os.environ.get("MAIN_OUTPUT_SHARDS", "1"))
-        self.sec_output_queue    = os.environ.get("SECONDARY_OUTPUT_QUEUE", "")
-        self.sec_output_exchange = os.environ.get("SECONDARY_OUTPUT_EXCHANGE", "")
-        self.sec_output_shards   = int(os.environ.get("SECONDARY_OUTPUT_SHARDS", "1"))
         self.batch_size      = int(os.environ.get("BATCH_SIZE", "500"))
         self.total_clients   = int(os.environ.get("TOTAL_CLIENTS", "0"))
-        self._main_out_buffer: dict = {}
-        self._sec_out_buffer: dict = {}
+
+        self.main_n_upstream = int(os.environ.get("MAIN_N_UPSTREAM", "1"))
+        self.sec_n_upstream  = int(os.environ.get("SECONDARY_N_UPSTREAM", "1"))
 
         # Configuration
         self._operation_mode = os.environ["OP_MODE"]
-        self._channel_stages = queue.Queue()
         self._results_buffer_next_stage = []
-        self._clients_eof_main_input = {}
-        self._clients_eof_sec_input = {}
         self._running = True
 
-        signal.signal(signal.SIGTERM, self._handle_sigterm)
-
         _wait_for_rabbitmq()
-        self._setup_connections()
         self._define_operation_mode()
 
-    def _setup_connections(self):
-        # Main input
-        if self.main_input_exchange and self.shard_id >= 0:
-            self._main_consumer = ShardedExchangeConsumer(RABBITMQ_HOST, self.main_input_exchange, self.shard_id)
-        elif self.main_input_queue:
-            self._main_consumer = MessageMiddlewareQueueRabbitMQ(RABBITMQ_HOST, self.main_input_queue)
-        else:
-            raise ValueError("Se requiere MAIN_INPUT_QUEUE o MAIN_INPUT_EXCHANGE + SHARD_ID")
-
-        # Secondary input
-        if self.sec_input_exchange and self.shard_id >= 0:
-            self._sec_consumer = ShardedExchangeConsumer(RABBITMQ_HOST, self.sec_input_exchange, self.shard_id)
-        elif self.sec_input_queue:
-            self._sec_consumer = MessageMiddlewareQueueRabbitMQ(RABBITMQ_HOST, self.sec_input_queue)
-        else:
-            raise ValueError("Se requiere SECONDARY_INPUT_QUEUE o SECONDARY_INPUT_EXCHANGE + SHARD_ID")
-
-        # Main output
-        if self.main_output_exchange and self.main_output_shards > 1:
-            self._main_producer = ShardedExchangeProducer(RABBITMQ_HOST, self.main_output_exchange, self.main_output_shards)
-        elif self.main_output_queue:
-            self._main_producer = MessageMiddlewareQueueRabbitMQ(RABBITMQ_HOST, self.main_output_queue)
-        else:
-            self._main_producer = None
-        
-        # Secondary output
-        if self.sec_output_exchange and self.sec_output_shards > 1:
-            self._sec_producer = ShardedExchangeProducer(RABBITMQ_HOST, self.sec_output_exchange, self.sec_output_shards)
-        elif self.sec_output_queue:
-            self._sec_producer = MessageMiddlewareQueueRabbitMQ(RABBITMQ_HOST, self.sec_output_queue)
-        else:
-            self._sec_producer = None
 
     def _define_operation_mode(self):
         if self._operation_mode != "PIPELINE" and self._operation_mode != "JOINER":
             raise ValueError("Modo de operación incorrecto. Debe ser PIPELINE o JOINER")
 
-    def _handle_sigterm(self, *_):
-        logger.info("SIGTERM recibido -> cerrando")
-        self._running = False
-        try:
-            self._main_consumer.stop_consuming()
-            self._sec_consumer.stop_consuming()
-        except Exception:
-            pass
+    def _handle_main_process_sigterm(self, *_):
+        self._main_consumer.stop_consuming()
+        self._main_consumer.close()
+        self._main_producer.close()
+
+    def _handle_sec_process_sigterm(self, *_):
+        self._sec_consumer.stop_consuming()
+        self._sec_consumer.close()
+        self._sec_producer.close()
 
     # --- Para implementar en subclases -------------------------------------------
 
@@ -237,7 +183,7 @@ class WorkerBaseDoubleIO:
         self._send_data_batch_to_next_stage()
 
     def _send_main_output_eof(self, client_id=None):
-        if self._producer is None:
+        if self._main_producer is None:
             return
         eof_msg = {"type": "eof"}
         if client_id is not None:
@@ -249,7 +195,7 @@ class WorkerBaseDoubleIO:
             self._main_producer.send(eof_body)
     
     def _send_sec_output_eof(self, client_id=None):
-        if self._producer is None:
+        if self._sec_producer is None:
             return
         eof_msg = {"type": "eof"}
         if client_id is not None:
@@ -267,12 +213,20 @@ class WorkerBaseDoubleIO:
                     self._emit_results_main_stage([result])
                 self._flush_all_next_stage()
         else: #For joiner, check if joiner action is necessary
-            if self._clients_eof_main_input[client_id] >= self.main_n_upstream and \
-                    self._clients_eof_sec_input[client_id] >= self.sec_n_upstream:
-                for result in self.on_both_eof_received(client_id):
-                    self._emit_main_output([result])
-                self._flush_all_main_buffer()
-                self._send_main_output_eof(client_id)
+            with self._eof_lock:
+                if self._clients_joined.get(client_id, False):
+                    return
+
+                main_ready = self._clients_eof_main_input.get(client_id, 0) >= self.main_n_upstream
+                sec_ready = self._clients_eof_sec_input.get(client_id, 0) >= self.sec_n_upstream
+                
+                if main_ready and sec_ready:
+                    self._clients_joined[client_id] = True
+                    
+                    for result in self.on_both_eof_received(client_id):
+                        self._emit_main_output([result])
+                    self._flush_all_main_buffer()
+                    self._send_main_output_eof(client_id)
 
     def _execute_eof_sec_input(self, client_id=None):
         if self._operation_mode == "PIPELINE":
@@ -282,12 +236,20 @@ class WorkerBaseDoubleIO:
                 self._flush_all_sec_buffer()
                 self._send_sec_output_eof(client_id)
         else: # For joiner, check if joiner action is necessary
-            if self._clients_eof_sec_input[client_id] >= self.sec_n_upstream and \
-                    self._clients_eof_main_input[client_id] >= self.main_n_upstream:
-                for result in self.on_both_eof_received(client_id):
-                    self._emit_main_output([result])
-                self._flush_all_main_buffer()
-                self._send_main_output_eof(client_id)
+            with self._eof_lock:
+                if self._clients_joined.get(client_id, False):
+                    return
+                
+                main_ready = self._clients_eof_main_input.get(client_id, 0) >= self.main_n_upstream
+                sec_ready = self._clients_eof_sec_input.get(client_id, 0) >= self.sec_n_upstream
+                
+                if main_ready and sec_ready:
+                    self._clients_joined[client_id] = True
+                    
+                    for result in self.on_both_eof_received(client_id):
+                        self._emit_main_output([result])
+                    self._flush_all_main_buffer()
+                    self._send_main_output_eof(client_id)
 
     # --- Loop principal ---------------------------------------------------------
 
@@ -309,8 +271,8 @@ class WorkerBaseDoubleIO:
                         return
 
                     self._clients_eof_main_input[client_id] = self._clients_eof_main_input.get(client_id, 0) + 1
-                    ack()
                     self._execute_eof_main_input(client_id)
+                    ack()
                     return
 
                 else:
@@ -341,15 +303,15 @@ class WorkerBaseDoubleIO:
                     if client_id is None:
                         eof_count[0] += 1
                         ack()
-                        if eof_count[0] >= self.n_upstream:
+                        if eof_count[0] >= self.sec_n_upstream:
                             self._execute_eof_sec_input(None)
                             self._sec_consumer.stop_consuming()
                             logger.info(f"{self.__class__.__name__} terminado")
                         return
 
                     self._clients_eof_sec_input[client_id] = self._clients_eof_sec_input.get(client_id, 0) + 1
-                    ack()
                     self._execute_eof_sec_input(client_id)
+                    ack()
                     return
 
 
@@ -371,15 +333,123 @@ class WorkerBaseDoubleIO:
             if self._running:
                 logger.error("Conexion perdida con RabbitMQ")
 
+    def run_main_process(self, clients_eof_main, clients_eof_sec, clients_joined, eof_lock, channel_stages):
+        # Shared variables
+        self._clients_eof_main_input = clients_eof_main
+        self._clients_eof_sec_input = clients_eof_sec
+        self._clients_joined = clients_joined
+        self._eof_lock = eof_lock
+        self._channel_stages = channel_stages
+
+        # Input
+        self.main_input_queue     = os.environ.get("MAIN_INPUT_QUEUE", "")
+        self.main_input_exchange  = os.environ.get("MAIN_INPUT_EXCHANGE", "")
+        self.shard_id             = int(os.environ.get("SHARD_ID", "-1"))
+
+        # Output
+        self.main_output_queue    = os.environ.get("MAIN_OUTPUT_QUEUE", "")
+        self.main_output_exchange = os.environ.get("MAIN_OUTPUT_EXCHANGE", "")
+        self.main_output_shards   = int(os.environ.get("MAIN_OUTPUT_SHARDS", "1"))
+        self._main_out_buffer: dict = {}
+
+        # Setup connections
+        # Main input
+        if self.main_input_exchange and self.shard_id >= 0:
+            self._main_consumer = ShardedExchangeConsumer(RABBITMQ_HOST, self.main_input_exchange, self.shard_id)
+        elif self.main_input_queue:
+            self._main_consumer = MessageMiddlewareQueueRabbitMQ(RABBITMQ_HOST, self.main_input_queue)
+        else:
+            raise ValueError("Se requiere MAIN_INPUT_QUEUE o MAIN_INPUT_EXCHANGE + SHARD_ID")
+
+        # Main output
+        if self.main_output_exchange and self.main_output_shards > 1:
+            self._main_producer = ShardedExchangeProducer(RABBITMQ_HOST, self.main_output_exchange, self.main_output_shards)
+        elif self.main_output_queue:
+            self._main_producer = MessageMiddlewareQueueRabbitMQ(RABBITMQ_HOST, self.main_output_queue)
+        else:
+            self._main_producer = None
+
+        # SIGTERM handler
+        signal.signal(signal.SIGTERM, self._handle_main_process_sigterm)
+
+        # Handle inputs
+        self.handle_message_main_input()
+
+    def run_sec_process(self, clients_eof_main, clients_eof_sec, clients_joined, eof_lock, channel_stages):
+        # Shared variables
+        self._clients_eof_main_input = clients_eof_main
+        self._clients_eof_sec_input = clients_eof_sec
+        self._clients_joined = clients_joined
+        self._eof_lock = eof_lock
+        self._channel_stages = channel_stages
+
+        # Input
+        self.sec_input_queue     = os.environ.get("SECONDARY_INPUT_QUEUE", "")
+        self.sec_input_exchange  = os.environ.get("SECONDARY_INPUT_EXCHANGE", "")
+        self.shard_id            = int(os.environ.get("SHARD_ID", "-1"))
+
+        # Output
+        self.sec_output_queue    = os.environ.get("SECONDARY_OUTPUT_QUEUE", "")
+        self.sec_output_exchange = os.environ.get("SECONDARY_OUTPUT_EXCHANGE", "")
+        self.sec_output_shards   = int(os.environ.get("SECONDARY_OUTPUT_SHARDS", "1"))
+        self._sec_out_buffer: dict = {}
+
+        # Setup connections
+        # Secondary input
+        if self.sec_input_exchange and self.shard_id >= 0:
+            self._sec_consumer = ShardedExchangeConsumer(RABBITMQ_HOST, self.sec_input_exchange, self.shard_id)
+        elif self.sec_input_queue:
+            self._sec_consumer = MessageMiddlewareQueueRabbitMQ(RABBITMQ_HOST, self.sec_input_queue)
+        else:
+            raise ValueError("Se requiere SECONDARY_INPUT_QUEUE o SECONDARY_INPUT_EXCHANGE + SHARD_ID")
+        
+        # Secondary output
+        if self.sec_output_exchange and self.sec_output_shards > 1:
+            self._sec_producer = ShardedExchangeProducer(RABBITMQ_HOST, self.sec_output_exchange, self.sec_output_shards)
+        elif self.sec_output_queue:
+            self._sec_producer = MessageMiddlewareQueueRabbitMQ(RABBITMQ_HOST, self.sec_output_queue)
+        else:
+            self._sec_producer = None
+
+        # SIGTERM handler
+        signal.signal(signal.SIGTERM, self._handle_sec_process_sigterm)
+
+        # Handle inputs
+        self.handle_message_sec_input()
+
 
     def run(self):
         logger.info(f"{self.__class__.__name__} iniciando")
 
-        with multiprocessing.Pool(processes=os.cpu_count()) as processes_pool:
-            processes_pool.apply_async(
-                self.handle_message_main_input, (),
-            )
+        # Create manager
+        manager = multiprocessing.Manager()
+        clients_eof_main = manager.dict()
+        clients_eof_sec = manager.dict()
+        clients_joined = manager.dict()
+        eof_lock = multiprocessing.Lock()
+        channel_stages = multiprocessing.Queue()
 
-            processes_pool.apply_async(
-                self.handle_message_sec_input, (),
-            )
+        # Create processes
+        main_process = multiprocessing.Process(
+            target=self.run_main_process, 
+            args=(clients_eof_main, clients_eof_sec, clients_joined, eof_lock, channel_stages)
+        )
+        sec_process = multiprocessing.Process(
+            target=self.run_sec_process,
+            args=(clients_eof_main, clients_eof_sec, clients_joined, eof_lock, channel_stages)
+        )
+
+        def _handle_sigterm(*_):
+            logger.info("SIGTERM recibido -> cerrando")
+            main_process.terminate()
+            sec_process.terminate()
+
+        signal.signal(signal.SIGTERM, _handle_sigterm)
+
+        # Start processes
+        main_process.start()
+        sec_process.start()
+
+        # Wait for processes to end
+        main_process.join()
+        sec_process.join()
