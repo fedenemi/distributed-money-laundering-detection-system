@@ -166,6 +166,8 @@ def generate_system_docker_compose(total_clients=0):
             ["Timestamp", "From Bank", "Account", "Amount Paid", "Payment Format"],
             input_exchange="usd_transactions_exc",
             output_exchange="q3_reduced_data_exc",
+            n_upstream=usd_instances,
+            output_shards=q3_filter_06092022_15092022_instances,
         )
         system = system | data_reducers_q3
 
@@ -176,6 +178,7 @@ def generate_system_docker_compose(total_clients=0):
             filter_field="Timestamp", filter_op="in", filter_value='["2022/09/06", "2022/09/15"]',
             input_exchange="q3_reduced_data_exc",
             output_queue="q3_transactions_queue",
+            n_upstream=q3_data_reducer_instances,
         )
         system = system | q3_filters_06092022_15092022
 
@@ -184,7 +187,9 @@ def generate_system_docker_compose(total_clients=0):
             q3_filter_01092022_05092022_prefix, q3_filter_01092022_05092022_instances,
             filter_field="Timestamp", filter_op="in", filter_value='["2022/09/01", "2022/09/05"]',
             input_exchange="q3_reduced_data_exc",
-            output_queue="q3_splitter_queue",
+            output_exchange="q3_splitter_exc",
+            n_upstream=q3_data_reducer_instances,
+            output_shards=q3_splitter_by_payment_method_instances,
         )
         system = system | q3_filters_01092022_05092022
 
@@ -194,6 +199,8 @@ def generate_system_docker_compose(total_clients=0):
             input_queue="q3_splitter_queue",
             output_exchange="q3_split_by_payment_method_exc",
             key_field="Payment Method",
+            n_upstream=q3_filter_01092022_05092022_instances,
+            output_shards=q3_avg_aggregators_preceding_period_instances,
         )
         system = system | q3_splitters_by_payment_method
 
@@ -203,6 +210,7 @@ def generate_system_docker_compose(total_clients=0):
             input_exchange="q3_split_by_payment_method_exc",
             output_queue="q3_avg_preceding_period",
             agg_op="avg", agg_field="Amount Paid", key_field="Payment Format",
+            n_upstream=q3_splitter_by_payment_method_instances,
         )
         system = system | q3_avg_aggregators
 
@@ -225,6 +233,8 @@ def generate_system_docker_compose(total_clients=0):
             ["Timestamp", "From Bank", "Account", "To Bank", "Account.1"],
             input_exchange="usd_transactions_exc",
             output_exchange="q4_reduced_data_exc",
+            n_upstream=usd_instances,
+            output_shards=q4_filter_01092022_05092022_instances,
         )
         system = system | data_reducers_q4
 
@@ -233,16 +243,20 @@ def generate_system_docker_compose(total_clients=0):
             q4_filter_01092022_05092022_prefix, q4_filter_01092022_05092022_instances,
             filter_field="Timestamp", filter_op="in", filter_value='["2022/09/01", "2022/09/05"]',
             input_exchange="q4_reduced_data_exc",
-            output_queue="q4_splitter_queue",
+            output_exchange="q4_splitter_exc",
+            n_upstream=q4_data_reducer_instances,
+            output_shards=q4_splitters_by_origin_and_dest_instances,
         )
         system = system | q4_filters_01092022_05092022
 
         # Split by origin and destination accounts
         q4_splitters_by_origin_and_dest = get_splitter_docker_services(
             q4_splitters_by_origin_and_dest_prefix, q4_splitters_by_origin_and_dest_instances,
-            input_queue="q4_splitter_queue",
+            input_exchange="q4_splitter_exc",
             output_exchange="q4_split_by_origin_and_dest_exc",
             key_fields=["From Bank", "Account", "To Bank", "Account.1"],
+            n_upstream=q4_filter_01092022_05092022_instances,
+            output_shards=q4_transaction_graph_instances,
         )
         system = system | q4_splitters_by_origin_and_dest
 
@@ -250,17 +264,21 @@ def generate_system_docker_compose(total_clients=0):
         q4_transactions_graphs = get_scatter_gather_services(
             q4_transaction_graph_prefix, q4_transaction_graph_instances,
             "sub_graph_agg",
-            "q4_split_by_origin_and_dest_exc",
-            "q4_subgraphs_edges",
+            input_exchange="q4_split_by_origin_and_dest_exc",
+            output_exchange="q4_subgraphs_edges_exc",
+            n_upstream=q4_splitters_by_origin_and_dest_instances,
+            output_shards=q4_graphs_edges_splitters_instances,
         )
         system = system | q4_transactions_graphs
 
         # Send edges as "in" for destination node and "out" for origin node
         q4_graphs_edges_splitters = get_splitter_docker_services(
             q4_graphs_edges_splitters_prefix, q4_graphs_edges_splitters_instances,
-            input_queue="q4_subgraphs_edges",
+            input_exchange="q4_subgraphs_edges_exc",
             output_exchange="q4_edges_exc",
             key_fields=["From Bank", "Account", "To Bank", "Account.1"],
+            n_upstream=q4_transaction_graph_instances,
+            output_shards=q4_paths_creators_instances,
         )
         system = system | q4_graphs_edges_splitters
 
@@ -268,17 +286,21 @@ def generate_system_docker_compose(total_clients=0):
         q4_paths_creators = get_scatter_gather_services(
             q4_paths_creators_prefix, q4_paths_creators_instances,
             "paths_creator",
-            "q4_edges_exc",
-            "q4_split_by_origin_and_dest_queue",
+            input_exchange="q4_edges_exc",
+            output_exchange="q4_split_by_origin_and_dest_exc",
+            n_upstream=q4_graphs_edges_splitters_instances,
+            output_shards=q4_paths_splitters_by_ends_instances,
         )
         system = system | q4_paths_creators
 
         # Split by origin and destination nodes
         q4_paths_splitters_by_ends = get_splitter_docker_services(
             q4_paths_splitters_by_ends_prefix, q4_paths_splitters_by_ends_instances,
-            input_queue="q4_split_by_origin_and_dest_queue",
+            input_exchange="q4_split_by_origin_and_dest_queue",
             output_exchange="q4_unique_paths_counter_exc",
             key_fields=["From Bank", "Account", "To Bank", "Account.1"],
+            n_upstream=q4_paths_creators_instances,
+            output_shards=q4_unique_paths_counters_instances
         )
         system = system | q4_paths_splitters_by_ends
 
@@ -287,8 +309,9 @@ def generate_system_docker_compose(total_clients=0):
             q4_unique_paths_counters_prefix,
             q4_unique_paths_counters_instances,
             "unique_paths_count",
-            "q4_paths_exc",
-            "results_4",
+            input_exchange="q4_paths_exc",
+            output_queue="results_4",
+            n_upstream=q4_paths_splitters_by_ends_instances,
         )
         system = system | q4_unique_paths_counters
 
