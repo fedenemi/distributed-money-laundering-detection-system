@@ -107,8 +107,8 @@ class WorkerBaseDoubleIO:
         """Clave de particion del mensaje. Override en Splitter."""
         return "__queue__"
 
-    def _buffer_key(self, msg: dict) -> str:
-        if self.output_exchange and self.output_shards > 1:
+    def _buffer_key(self, msg: dict, output_exchange, output_shards) -> str:
+        if output_exchange and output_shards > 1:
             return self._routing_key(msg)
         if isinstance(msg, dict):
             client_id = msg.get("client_id")
@@ -136,7 +136,7 @@ class WorkerBaseDoubleIO:
         if not results or self._main_producer is None:
             return
         for msg in results:
-            buf_key = self._buffer_key(msg)
+            buf_key = self._buffer_key(msg, self.main_output_exchange, self.main_output_shards)
             self._main_out_buffer.setdefault(buf_key, []).append(msg)
             if len(self._main_out_buffer[buf_key]) >= self.batch_size:
                 self._flush_main_buffer_key(buf_key)
@@ -145,7 +145,7 @@ class WorkerBaseDoubleIO:
         if not results or self._sec_producer is None:
             return
         for msg in results:
-            buf_key = self._buffer_key(msg)
+            buf_key = self._buffer_key(msg, self.sec_output_exchange, self.sec_output_shards)
             self._sec_out_buffer.setdefault(buf_key, []).append(msg)
             if len(self._sec_out_buffer[buf_key]) >= self.batch_size:
                 self._flush_sec_buffer_key(buf_key)
@@ -334,6 +334,7 @@ class WorkerBaseDoubleIO:
                 logger.error("Conexion perdida con RabbitMQ")
 
     def run_main_process(self, clients_eof_main, clients_eof_sec, clients_joined, eof_lock, channel_stages):
+        logging.basicConfig(level=logging.INFO)
         # Shared variables
         self._clients_eof_main_input = clients_eof_main
         self._clients_eof_sec_input = clients_eof_sec
@@ -352,6 +353,11 @@ class WorkerBaseDoubleIO:
         self.main_output_shards   = int(os.environ.get("MAIN_OUTPUT_SHARDS", "1"))
         self._main_out_buffer: dict = {}
 
+        self.sec_output_queue    = os.environ.get("SECONDARY_OUTPUT_QUEUE", "")
+        self.sec_output_exchange = os.environ.get("SECONDARY_OUTPUT_EXCHANGE", "")
+        self.sec_output_shards   = int(os.environ.get("SECONDARY_OUTPUT_SHARDS", "1"))
+        self._sec_out_buffer: dict = {}
+
         # Setup connections
         # Main input
         if self.main_input_exchange and self.shard_id >= 0:
@@ -369,6 +375,14 @@ class WorkerBaseDoubleIO:
         else:
             self._main_producer = None
 
+        # Secondary output
+        if self.sec_output_exchange and self.sec_output_shards > 1:
+            self._sec_producer = ShardedExchangeProducer(RABBITMQ_HOST, self.sec_output_exchange, self.sec_output_shards)
+        elif self.sec_output_queue:
+            self._sec_producer = MessageMiddlewareQueueRabbitMQ(RABBITMQ_HOST, self.sec_output_queue)
+        else:
+            self._sec_producer = None
+
         # SIGTERM handler
         signal.signal(signal.SIGTERM, self._handle_main_process_sigterm)
 
@@ -376,6 +390,7 @@ class WorkerBaseDoubleIO:
         self.handle_message_main_input()
 
     def run_sec_process(self, clients_eof_main, clients_eof_sec, clients_joined, eof_lock, channel_stages):
+        logging.basicConfig(level=logging.INFO)
         # Shared variables
         self._clients_eof_main_input = clients_eof_main
         self._clients_eof_sec_input = clients_eof_sec
@@ -388,7 +403,13 @@ class WorkerBaseDoubleIO:
         self.sec_input_exchange  = os.environ.get("SECONDARY_INPUT_EXCHANGE", "")
         self.shard_id            = int(os.environ.get("SHARD_ID", "-1"))
 
-        # Output
+        # Main output
+        self.main_output_queue    = os.environ.get("MAIN_OUTPUT_QUEUE", "")
+        self.main_output_exchange = os.environ.get("MAIN_OUTPUT_EXCHANGE", "")
+        self.main_output_shards   = int(os.environ.get("MAIN_OUTPUT_SHARDS", "1"))
+        self._main_out_buffer: dict = {}
+
+        # Secondary output
         self.sec_output_queue    = os.environ.get("SECONDARY_OUTPUT_QUEUE", "")
         self.sec_output_exchange = os.environ.get("SECONDARY_OUTPUT_EXCHANGE", "")
         self.sec_output_shards   = int(os.environ.get("SECONDARY_OUTPUT_SHARDS", "1"))
@@ -402,7 +423,15 @@ class WorkerBaseDoubleIO:
             self._sec_consumer = MessageMiddlewareQueueRabbitMQ(RABBITMQ_HOST, self.sec_input_queue)
         else:
             raise ValueError("Se requiere SECONDARY_INPUT_QUEUE o SECONDARY_INPUT_EXCHANGE + SHARD_ID")
-        
+
+        # Main output
+        if self.main_output_exchange and self.main_output_shards > 1:
+            self._main_producer = ShardedExchangeProducer(RABBITMQ_HOST, self.main_output_exchange, self.main_output_shards)
+        elif self.main_output_queue:
+            self._main_producer = MessageMiddlewareQueueRabbitMQ(RABBITMQ_HOST, self.main_output_queue)
+        else:
+            self._main_producer = None
+
         # Secondary output
         if self.sec_output_exchange and self.sec_output_shards > 1:
             self._sec_producer = ShardedExchangeProducer(RABBITMQ_HOST, self.sec_output_exchange, self.sec_output_shards)

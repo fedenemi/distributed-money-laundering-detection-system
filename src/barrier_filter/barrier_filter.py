@@ -40,15 +40,17 @@ class BarrierFilter(WorkerBaseDoubleIO):
         return ([], [])
 
     def on_both_eof_received(self, client_id=None):
-        logging.info(f"Ambos EOF recibidos")
+        logging.info(f"Ambos EOF recibidos de cliente {client_id}")
         transactions = self._transactions_by_client.get(client_id, [])
         comparison_values = self._comparison_values_by_client.get(client_id, {})
+        logging.info(f"Se tienen {len(transactions)} transacciones.")
+        logging.info(f"Se tienen {len(comparison_values)} promedios.")
 
         for transaction in transactions:
-            payment_method = transaction["Payment Method"]
+            payment_method = transaction["Payment Format"]
 
             if payment_method in comparison_values:
-                if transaction["Amount Paid"] < comparison_values[payment_method]:
+                if float(transaction["Amount Paid"]) < comparison_values[payment_method]:
                     yield {
                         "From Bank": transaction["From Bank"],
                         "Account": transaction["Account"],

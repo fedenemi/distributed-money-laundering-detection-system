@@ -34,7 +34,7 @@ def generate_system_docker_compose(total_clients=0):
         # Create gateway (publica en exchange shardeado)
         gateway = get_gateway_docker_services(
             input_query_queue_prefix="results",
-            total_queries=2,
+            total_queries=4,
             output_exchange="gateway_exc",
         )
         usd_prefix, usd_instances = _get_next_config_row(config_file_reader)
@@ -196,7 +196,7 @@ def generate_system_docker_compose(total_clients=0):
         # Split by payment method
         q3_splitters_by_payment_method = get_splitter_docker_services(
             q3_splitter_by_payment_method_prefix, q3_splitter_by_payment_method_instances,
-            input_queue="q3_splitter_queue",
+            input_exchange="q3_splitter_exc",
             output_exchange="q3_split_by_payment_method_exc",
             key_field="Payment Method",
             n_upstream=q3_filter_01092022_05092022_instances,
@@ -219,7 +219,7 @@ def generate_system_docker_compose(total_clients=0):
             q3_avg_and_transactions_joiner_prefix, q3_avg_and_transactions_joiner_instances,
             main_input_queue="q3_transactions_queue",
             sec_input_queue="q3_avg_preceding_period",
-            output_queue="q3_transactions_queue",
+            output_queue="results_3",
         )
         system = system | q3_avg_and_transactions_joiner
 
