@@ -40,17 +40,43 @@ CURRENCY_CODES = {
     "Swiss Franc": "CHF", "Australian Dollar": "AUD",
     "Canadian Dollar": "CAD", "Mexican Peso": "MXN",
     "Brazil Real": "BRL", "Rupee": "INR", "Saudi Riyal": "SAR",
+    "Bitcoin": "BTC",
+    "Shekel": "ILS",
 }
+
+BTC_RATES_PATH = os.path.join(
+    os.path.dirname(__file__), "src", "money_converter", "btc_rates.csv"
+)
+
+
+@lru_cache(maxsize=1)
+def _load_btc_rates():
+    rates = {}
+    try:
+        with open(BTC_RATES_PATH, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                day = str(row.get("date", "")).strip().replace("/", "-")
+                rate = row.get("rate")
+                if day and rate:
+                    rates[day] = float(rate)
+    except Exception:
+        return {}
+    return rates
+
+
+def _get_btc_rate(day):
+    return _load_btc_rates().get(day)
 
 @lru_cache(maxsize=1024)
 def get_rate(from_code, day):
     if from_code == "USD":
         return 1.0
     try:
-        url = f"https://api.frankfurter.app/{day}?from={from_code}&to=USD"
+        url = f"https://api.frankfurter.dev/v2/rate/{from_code}/USD?date={day}"
         resp = requests.get(url, timeout=10)
         resp.raise_for_status()
-        return resp.json()["rates"]["USD"]
+        return resp.json()["rate"]
     except Exception:
         return None
 
@@ -60,6 +86,10 @@ def to_usd(amount, currency, timestamp):
         return None
     if code == "USD":
         return amount
+    if code == "BTC":
+        day = parse_date(timestamp).isoformat()
+        rate = _get_btc_rate(day)
+        return amount * rate if rate else None
     day = parse_date(timestamp).isoformat()
     rate = get_rate(code, day)
     return amount * rate if rate else None

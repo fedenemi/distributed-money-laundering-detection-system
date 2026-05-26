@@ -31,6 +31,8 @@ import os
 import signal
 import time
 import multiprocessing
+import hashlib
+import random
 
 from common.middleware.middleware_rabbitmq import MessageMiddlewareQueueRabbitMQ
 from common.middleware.middleware_sharded import ShardedExchangeConsumer, ShardedExchangeProducer
@@ -40,6 +42,7 @@ logger = logging.getLogger(__name__)
 
 RABBITMQ_HOST = os.environ.get("RABBITMQ_HOST", "rabbitmq")
 RECONNECT_DELAY = 2
+RECONNECT_MAX_DELAY = 30
 
 
 def _wait_for_rabbitmq():
@@ -75,6 +78,11 @@ class WorkerBaseDoubleIO:
     def _define_operation_mode(self):
         if self._operation_mode != "PIPELINE" and self._operation_mode != "JOINER":
             raise ValueError("Modo de operación incorrecto. Debe ser PIPELINE o JOINER")
+
+    def _reconnect_backoff(self, attempt: int):
+        delay = min(RECONNECT_DELAY * (2 ** attempt), RECONNECT_MAX_DELAY)
+        logger.warning(f"Reintentando conexion en {delay}s...")
+        time.sleep(delay)
 
     def _handle_main_process_sigterm(self, *_):
         self._close_main_resources()
@@ -179,7 +187,12 @@ class WorkerBaseDoubleIO:
 
     def _buffer_key(self, msg: dict, output_exchange, output_shards) -> str:
         if output_exchange and output_shards > 1:
-            return self._routing_key(msg)
+            if isinstance(msg, dict):
+                routing_field = os.environ.get("ROUTING_FIELD")
+                if routing_field and routing_field in msg:
+                    val = str(msg[routing_field]).encode()
+                    return str(int(hashlib.md5(val).hexdigest(), 16) % output_shards)
+            return str(random.randint(0, output_shards - 1))
         if isinstance(msg, dict):
             client_id = msg.get("client_id")
             if client_id is not None:
@@ -189,7 +202,10 @@ class WorkerBaseDoubleIO:
     # --- Emisión con Buffer y flush --------------------------------------------------------
 
     def _send_data_batch_to_next_stage(self):
+        if not self._results_buffer_next_stage:
+            return
         new_data_batch = self._results_buffer_next_stage
+        self._results_buffer_next_stage = []
         self._channel_stages.put(new_data_batch)
 
     def _send_data_to_next_stage(self, results: list):
@@ -314,6 +330,8 @@ class WorkerBaseDoubleIO:
                 for result in self.on_main_input_eof(client_id):
                     self._emit_results_main_stage([result])
                 self._flush_all_next_stage()
+                # Propagate EOF to main output so downstream (e.g., API client) can finish.
+                self._send_main_output_eof(client_id)
         else: #For joiner, check if joiner action is necessary
             with self._eof_lock:
                 if self._clients_joined.get(client_id, False):
@@ -388,13 +406,23 @@ class WorkerBaseDoubleIO:
                 logger.error(f"Error procesando mensaje: {e}")
                 nack()
 
-        try:
-            self._main_consumer.start_consuming(on_message)
-        except MessageMiddlewareDisconnectedError:
-            if self._running:
+        attempt = 0
+        while self._running:
+            try:
+                self._main_consumer.start_consuming(on_message)
+                break
+            except MessageMiddlewareDisconnectedError:
+                if not self._running:
+                    break
                 logger.error("Conexion perdida con RabbitMQ")
-        finally:
-            self._close_main_resources()
+                self._close_main_resources()
+                _wait_for_rabbitmq()
+                self._reconnect_backoff(attempt)
+                self._main_consumer = self._create_main_consumer()
+                attempt += 1
+            finally:
+                if not self._running:
+                    self._close_main_resources()
 
     def handle_message_sec_input(self):
         eof_count = [0]
@@ -431,13 +459,37 @@ class WorkerBaseDoubleIO:
                 logger.error(f"Error procesando mensaje: {e}")
                 nack()
 
-        try:
-            self._sec_consumer.start_consuming(on_message)
-        except MessageMiddlewareDisconnectedError:
-            if self._running:
+        attempt = 0
+        while self._running:
+            try:
+                self._sec_consumer.start_consuming(on_message)
+                break
+            except MessageMiddlewareDisconnectedError:
+                if not self._running:
+                    break
                 logger.error("Conexion perdida con RabbitMQ")
-        finally:
-            self._close_sec_resources()
+                self._close_sec_resources()
+                _wait_for_rabbitmq()
+                self._reconnect_backoff(attempt)
+                self._sec_consumer = self._create_sec_consumer()
+                attempt += 1
+            finally:
+                if not self._running:
+                    self._close_sec_resources()
+
+    def _create_main_consumer(self):
+        if self.main_input_exchange and self.shard_id >= 0:
+            return ShardedExchangeConsumer(RABBITMQ_HOST, self.main_input_exchange, self.shard_id)
+        if self.main_input_queue:
+            return MessageMiddlewareQueueRabbitMQ(RABBITMQ_HOST, self.main_input_queue)
+        raise ValueError("Se requiere MAIN_INPUT_QUEUE o MAIN_INPUT_EXCHANGE + SHARD_ID")
+
+    def _create_sec_consumer(self):
+        if self.sec_input_exchange and self.shard_id >= 0:
+            return ShardedExchangeConsumer(RABBITMQ_HOST, self.sec_input_exchange, self.shard_id)
+        if self.sec_input_queue:
+            return MessageMiddlewareQueueRabbitMQ(RABBITMQ_HOST, self.sec_input_queue)
+        raise ValueError("Se requiere SECONDARY_INPUT_QUEUE o SECONDARY_INPUT_EXCHANGE + SHARD_ID")
 
     def run_main_process(self, clients_eof_main, clients_eof_sec, clients_joined, eof_lock, channel_stages):
         logging.basicConfig(level=logging.INFO)
@@ -466,12 +518,7 @@ class WorkerBaseDoubleIO:
 
         # Setup connections
         # Main input
-        if self.main_input_exchange and self.shard_id >= 0:
-            self._main_consumer = ShardedExchangeConsumer(RABBITMQ_HOST, self.main_input_exchange, self.shard_id)
-        elif self.main_input_queue:
-            self._main_consumer = MessageMiddlewareQueueRabbitMQ(RABBITMQ_HOST, self.main_input_queue)
-        else:
-            raise ValueError("Se requiere MAIN_INPUT_QUEUE o MAIN_INPUT_EXCHANGE + SHARD_ID")
+        self._main_consumer = self._create_main_consumer()
 
         # Main output
         if self.main_output_exchange and self.main_output_shards > 1:
@@ -523,12 +570,7 @@ class WorkerBaseDoubleIO:
 
         # Setup connections
         # Secondary input
-        if self.sec_input_exchange and self.shard_id >= 0:
-            self._sec_consumer = ShardedExchangeConsumer(RABBITMQ_HOST, self.sec_input_exchange, self.shard_id)
-        elif self.sec_input_queue:
-            self._sec_consumer = MessageMiddlewareQueueRabbitMQ(RABBITMQ_HOST, self.sec_input_queue)
-        else:
-            raise ValueError("Se requiere SECONDARY_INPUT_QUEUE o SECONDARY_INPUT_EXCHANGE + SHARD_ID")
+        self._sec_consumer = self._create_sec_consumer()
 
         # Main output
         if self.main_output_exchange and self.main_output_shards > 1:

@@ -77,9 +77,11 @@ class Aggregator(WorkerBase):
 
         elif self.op == "sum":
             val = float(data.get(self.agg_field, 0))
+            logger.info(f"Adding to sum key: {k} value: {val} (current sum: {state.get(k, 0.0)})")
             state[k] = state.get(k, 0.0) + val
 
         elif self.op == "count":
+            logger.info(f"Counting key: {k} (current count: {state.get(k, 0)})")
             state[k] = state.get(k, 0) + 1
 
         return []

@@ -20,6 +20,27 @@ services:
     volumes:
     - ./datasets:/datasets
     - ./results:/results
+  client_1:
+    build:
+      context: ./src
+      dockerfile: client/Dockerfile
+    container_name: client_1
+    depends_on:
+      gateway:
+        condition: service_started
+    environment:
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - SERVER_HOST=gateway
+    - SERVER_PORT=7659
+    - BATCH_SIZE=500
+    - TRANSACTIONS_FILE=/datasets/transactions_10k.csv
+    - ACCOUNTS_FILE=/datasets/accounts_10k.csv
+    - CLIENT_ID=1
+    - RESULTS_DIR=/results
+    volumes:
+    - ./datasets:/datasets
+    - ./results:/results
   gateway:
     build:
       context: ./src
@@ -39,7 +60,7 @@ services:
     - OUTPUT_SHARDS=2
     - QUERY_1_N_UPSTREAM=2
     - QUERY_2_N_UPSTREAM=2
-    - QUERY_3_N_UPSTREAM=1
+    - QUERY_3_N_UPSTREAM=3
     - TRANSACTION_COLUMNS=Timestamp,From Bank,Account,To Bank,Account.1,Amount Received,Receiving
       Currency,Amount Paid,Payment Currency,Payment Format
   q1_data_reducer_0:
@@ -58,7 +79,7 @@ services:
     - OUTPUT_EXCHANGE=q1_reduced_exc
     - OUTPUT_SHARDS=2
     - KEEP_COLUMNS=From Bank,Account,To Bank,Account.1,Amount Paid
-    - TOTAL_CLIENTS=1
+    - TOTAL_CLIENTS=2
   q1_data_reducer_1:
     build:
       context: ./src
@@ -75,7 +96,7 @@ services:
     - OUTPUT_EXCHANGE=q1_reduced_exc
     - OUTPUT_SHARDS=2
     - KEEP_COLUMNS=From Bank,Account,To Bank,Account.1,Amount Paid
-    - TOTAL_CLIENTS=1
+    - TOTAL_CLIENTS=2
   q1_data_reducer_2:
     build:
       context: ./src
@@ -92,7 +113,7 @@ services:
     - OUTPUT_EXCHANGE=q1_reduced_exc
     - OUTPUT_SHARDS=2
     - KEEP_COLUMNS=From Bank,Account,To Bank,Account.1,Amount Paid
-    - TOTAL_CLIENTS=1
+    - TOTAL_CLIENTS=2
   q1_filter_lt_50_0:
     build:
       context: ./src
@@ -111,7 +132,7 @@ services:
     - FILTER_FIELD=Amount Paid
     - FILTER_OP=lt
     - FILTER_VALUE=50
-    - TOTAL_CLIENTS=1
+    - TOTAL_CLIENTS=2
   q1_filter_lt_50_1:
     build:
       context: ./src
@@ -130,7 +151,7 @@ services:
     - FILTER_FIELD=Amount Paid
     - FILTER_OP=lt
     - FILTER_VALUE=50
-    - TOTAL_CLIENTS=1
+    - TOTAL_CLIENTS=2
   q2_aggregator_0:
     build:
       context: ./src
@@ -150,7 +171,7 @@ services:
     - AGG_FIELD=Amount Paid
     - KEY_FIELD=From Bank
     - CARRY_FIELDS=Account
-    - TOTAL_CLIENTS=1
+    - TOTAL_CLIENTS=2
   q2_aggregator_1:
     build:
       context: ./src
@@ -170,7 +191,7 @@ services:
     - AGG_FIELD=Amount Paid
     - KEY_FIELD=From Bank
     - CARRY_FIELDS=Account
-    - TOTAL_CLIENTS=1
+    - TOTAL_CLIENTS=2
   q2_data_reducer_0:
     build:
       context: ./src
@@ -187,7 +208,7 @@ services:
     - OUTPUT_EXCHANGE=q2_reduced_exc
     - OUTPUT_SHARDS=2
     - KEEP_COLUMNS=From Bank,Account,Amount Paid
-    - TOTAL_CLIENTS=1
+    - TOTAL_CLIENTS=2
     - ROUTING_FIELD=From Bank
   q2_data_reducer_1:
     build:
@@ -205,7 +226,7 @@ services:
     - OUTPUT_EXCHANGE=q2_reduced_exc
     - OUTPUT_SHARDS=2
     - KEEP_COLUMNS=From Bank,Account,Amount Paid
-    - TOTAL_CLIENTS=1
+    - TOTAL_CLIENTS=2
     - ROUTING_FIELD=From Bank
   q2_splitter_by_bank_0:
     build:
@@ -227,7 +248,7 @@ services:
     - N_UPSTREAM=2
     - OUTPUT_SHARDS=2
     - SHARD_KEY_FIELD=From Bank
-    - TOTAL_CLIENTS=1
+    - TOTAL_CLIENTS=2
   q2_splitter_by_bank_1:
     build:
       context: ./src
@@ -248,7 +269,7 @@ services:
     - N_UPSTREAM=2
     - OUTPUT_SHARDS=2
     - SHARD_KEY_FIELD=From Bank
-    - TOTAL_CLIENTS=1
+    - TOTAL_CLIENTS=2
   q2_splitter_by_bank_2:
     build:
       context: ./src
@@ -269,167 +290,352 @@ services:
     - N_UPSTREAM=2
     - OUTPUT_SHARDS=2
     - SHARD_KEY_FIELD=From Bank
-    - TOTAL_CLIENTS=1
-  q5_counter_0:
+    - TOTAL_CLIENTS=2
+  q3_avg_aggregators_preceding_period_0:
     build:
       context: ./src
       dockerfile: aggregators/Dockerfile
-    container_name: q5_counter_0
+    container_name: q3_avg_aggregators_preceding_period_0
     depends_on:
       rabbitmq:
         condition: service_healthy
     environment:
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - INPUT_QUEUE=q5_countable_transactions
-    - OUTPUT_QUEUE=q5_totals_reached
-    - AGG_OP=count
-  q5_data_reducer_0:
-    build:
-      context: ./src
-      dockerfile: data_reducer/Dockerfile
-    container_name: q5_data_reducer_0
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-    environment:
-    - RABBITMQ_HOST=rabbitmq
-    - N_UPSTREAM=1
-    - INPUT_EXCHANGE=gateway_exc
+    - INPUT_EXCHANGE=q3_split_by_payment_method_exc
     - SHARD_ID=0
-    - OUTPUT_QUEUE=q5_reduced_data
-    - KEEP_COLUMNS=Timestamp,Amount Paid,Payment Currency,Payment Format
-  q5_data_reducer_1:
+    - N_UPSTREAM=3
+    - OUTPUT_EXCHANGE=q3_avg_preceding_period_exc
+    - AGG_OP=avg
+    - AGG_FIELD=Amount Paid
+    - KEY_FIELD=Payment Format
+    - ROUTING_FIELD=client_id
+    - OUTPUT_SHARDS=3
+  q3_avg_aggregators_preceding_period_1:
     build:
       context: ./src
-      dockerfile: data_reducer/Dockerfile
-    container_name: q5_data_reducer_1
+      dockerfile: aggregators/Dockerfile
+    container_name: q3_avg_aggregators_preceding_period_1
     depends_on:
       rabbitmq:
         condition: service_healthy
     environment:
-    - RABBITMQ_HOST=rabbitmq
-    - N_UPSTREAM=1
-    - INPUT_EXCHANGE=gateway_exc
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - INPUT_EXCHANGE=q3_split_by_payment_method_exc
     - SHARD_ID=1
-    - OUTPUT_QUEUE=q5_reduced_data
-    - KEEP_COLUMNS=Timestamp,Amount Paid,Payment Currency,Payment Format
-  q5_data_reducer_2:
+    - N_UPSTREAM=3
+    - OUTPUT_EXCHANGE=q3_avg_preceding_period_exc
+    - AGG_OP=avg
+    - AGG_FIELD=Amount Paid
+    - KEY_FIELD=Payment Format
+    - ROUTING_FIELD=client_id
+    - OUTPUT_SHARDS=3
+  q3_avg_aggregators_preceding_period_2:
+    build:
+      context: ./src
+      dockerfile: aggregators/Dockerfile
+    container_name: q3_avg_aggregators_preceding_period_2
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - INPUT_EXCHANGE=q3_split_by_payment_method_exc
+    - SHARD_ID=2
+    - N_UPSTREAM=3
+    - OUTPUT_EXCHANGE=q3_avg_preceding_period_exc
+    - AGG_OP=avg
+    - AGG_FIELD=Amount Paid
+    - KEY_FIELD=Payment Format
+    - ROUTING_FIELD=client_id
+    - OUTPUT_SHARDS=3
+  q3_avg_and_transactions_joiner_0:
+    build:
+      context: ./src
+      dockerfile: barrier_filter/Dockerfile
+    container_name: q3_avg_and_transactions_joiner_0
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - OP_MODE=JOINER
+    - COEF=0.01
+    - MAIN_INPUT_EXCHANGE=q3_transactions_exc
+    - SHARD_ID=0
+    - SECONDARY_INPUT_EXCHANGE=q3_avg_preceding_period_exc
+    - SHARD_ID=0
+    - MAIN_N_UPSTREAM=3
+    - SEC_N_UPSTREAM=3
+    - MAIN_OUTPUT_QUEUE=results_3
+  q3_avg_and_transactions_joiner_1:
+    build:
+      context: ./src
+      dockerfile: barrier_filter/Dockerfile
+    container_name: q3_avg_and_transactions_joiner_1
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - OP_MODE=JOINER
+    - COEF=0.01
+    - MAIN_INPUT_EXCHANGE=q3_transactions_exc
+    - SHARD_ID=1
+    - SECONDARY_INPUT_EXCHANGE=q3_avg_preceding_period_exc
+    - SHARD_ID=1
+    - MAIN_N_UPSTREAM=3
+    - SEC_N_UPSTREAM=3
+    - MAIN_OUTPUT_QUEUE=results_3
+  q3_avg_and_transactions_joiner_2:
+    build:
+      context: ./src
+      dockerfile: barrier_filter/Dockerfile
+    container_name: q3_avg_and_transactions_joiner_2
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - OP_MODE=JOINER
+    - COEF=0.01
+    - MAIN_INPUT_EXCHANGE=q3_transactions_exc
+    - SHARD_ID=2
+    - SECONDARY_INPUT_EXCHANGE=q3_avg_preceding_period_exc
+    - SHARD_ID=2
+    - MAIN_N_UPSTREAM=3
+    - SEC_N_UPSTREAM=3
+    - MAIN_OUTPUT_QUEUE=results_3
+  q3_data_reducer_0:
     build:
       context: ./src
       dockerfile: data_reducer/Dockerfile
-    container_name: q5_data_reducer_2
+    container_name: q3_data_reducer_0
     depends_on:
       rabbitmq:
         condition: service_healthy
     environment:
     - RABBITMQ_HOST=rabbitmq
-    - N_UPSTREAM=1
-    - INPUT_EXCHANGE=gateway_exc
+    - N_UPSTREAM=2
+    - INPUT_EXCHANGE=usd_transactions_exc
+    - SHARD_ID=0
+    - OUTPUT_EXCHANGE=q3_reduced_data_exc
+    - OUTPUT_SHARDS=3
+    - KEEP_COLUMNS=Timestamp,From Bank,Account,Amount Paid,Payment Format
+  q3_data_reducer_1:
+    build:
+      context: ./src
+      dockerfile: data_reducer/Dockerfile
+    container_name: q3_data_reducer_1
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - RABBITMQ_HOST=rabbitmq
+    - N_UPSTREAM=2
+    - INPUT_EXCHANGE=usd_transactions_exc
+    - SHARD_ID=1
+    - OUTPUT_EXCHANGE=q3_reduced_data_exc
+    - OUTPUT_SHARDS=3
+    - KEEP_COLUMNS=Timestamp,From Bank,Account,Amount Paid,Payment Format
+  q3_data_reducer_2:
+    build:
+      context: ./src
+      dockerfile: data_reducer/Dockerfile
+    container_name: q3_data_reducer_2
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - RABBITMQ_HOST=rabbitmq
+    - N_UPSTREAM=2
+    - INPUT_EXCHANGE=usd_transactions_exc
     - SHARD_ID=2
-    - OUTPUT_QUEUE=q5_reduced_data
-    - KEEP_COLUMNS=Timestamp,Amount Paid,Payment Currency,Payment Format
-  q5_filter_01092022_05092022_0:
+    - OUTPUT_EXCHANGE=q3_reduced_data_exc
+    - OUTPUT_SHARDS=3
+    - KEEP_COLUMNS=Timestamp,From Bank,Account,Amount Paid,Payment Format
+  q3_filter_01092022_05092022_0:
     build:
       context: ./src
       dockerfile: filters/Dockerfile
-    container_name: q5_filter_01092022_05092022_0
+    container_name: q3_filter_01092022_05092022_0
     depends_on:
       rabbitmq:
         condition: service_healthy
     environment:
     - RABBITMQ_HOST=rabbitmq
     - N_UPSTREAM=1
-    - N_UPSTREAM=1
-    - INPUT_QUEUE=q5_reduced_data
-    - OUTPUT_QUEUE=q5_converter_to_usd
+    - N_UPSTREAM=3
+    - INPUT_EXCHANGE=q3_reduced_data_exc
+    - SHARD_ID=0
+    - OUTPUT_EXCHANGE=q3_splitter_exc
+    - OUTPUT_SHARDS=3
     - FILTER_FIELD=Timestamp
     - FILTER_OP=in
     - FILTER_VALUE=["2022/09/01", "2022/09/05"]
-  q5_filter_lt_1_usd_0:
+  q3_filter_01092022_05092022_1:
     build:
       context: ./src
       dockerfile: filters/Dockerfile
-    container_name: q5_filter_lt_1_usd_0
+    container_name: q3_filter_01092022_05092022_1
     depends_on:
       rabbitmq:
         condition: service_healthy
     environment:
     - RABBITMQ_HOST=rabbitmq
     - N_UPSTREAM=1
-    - N_UPSTREAM=1
-    - INPUT_QUEUE=q5_converted_amounts_transactions
-    - OUTPUT_QUEUE=q5_small_amounts_transactions
-    - FILTER_FIELD=Amount Paid
-    - FILTER_OP=lt
-    - FILTER_VALUE=1
-  q5_money_converter_0:
+    - N_UPSTREAM=3
+    - INPUT_EXCHANGE=q3_reduced_data_exc
+    - SHARD_ID=1
+    - OUTPUT_EXCHANGE=q3_splitter_exc
+    - OUTPUT_SHARDS=3
+    - FILTER_FIELD=Timestamp
+    - FILTER_OP=in
+    - FILTER_VALUE=["2022/09/01", "2022/09/05"]
+  q3_filter_01092022_05092022_2:
     build:
       context: ./src
-      dockerfile: money_converter/Dockerfile
-    container_name: q5_money_converter_0
+      dockerfile: filters/Dockerfile
+    container_name: q3_filter_01092022_05092022_2
     depends_on:
       rabbitmq:
         condition: service_healthy
     environment:
-    - MOM_HOST=rabbitmq
-    - PYTHONUNBUFFERED=1
-    - OP_MODE=PIPELINE
-    - MAIN_INPUT_QUEUE=q5_converter_to_usd
-    - SECONDARY_INPUT_QUEUE=q5_currency_rates_from_api
-    - MAIN_OUTPUT_QUEUE=q5_reqs_currency_rates_api
-    - SECONDARY_OUTPUT_QUEUE=q5_converted_amounts_transactions
-    - TARGET_CURRENCY=US Dollar
-    - BATCH_SIZE=1
-  q5_money_converter_api_client_0:
+    - RABBITMQ_HOST=rabbitmq
+    - N_UPSTREAM=1
+    - N_UPSTREAM=3
+    - INPUT_EXCHANGE=q3_reduced_data_exc
+    - SHARD_ID=2
+    - OUTPUT_EXCHANGE=q3_splitter_exc
+    - OUTPUT_SHARDS=3
+    - FILTER_FIELD=Timestamp
+    - FILTER_OP=in
+    - FILTER_VALUE=["2022/09/01", "2022/09/05"]
+  q3_filter_06092022_15092022_0:
     build:
       context: ./src
-      dockerfile: money_converter/Dockerfile
-    container_name: q5_money_converter_api_client_0
+      dockerfile: filters/Dockerfile
+    container_name: q3_filter_06092022_15092022_0
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - RABBITMQ_HOST=rabbitmq
+    - N_UPSTREAM=1
+    - N_UPSTREAM=3
+    - INPUT_EXCHANGE=q3_reduced_data_exc
+    - SHARD_ID=0
+    - OUTPUT_EXCHANGE=q3_transactions_exc
+    - OUTPUT_SHARDS=3
+    - FILTER_FIELD=Timestamp
+    - FILTER_OP=in
+    - FILTER_VALUE=["2022/09/06", "2022/09/15"]
+    - ROUTING_FIELD=client_id
+  q3_filter_06092022_15092022_1:
+    build:
+      context: ./src
+      dockerfile: filters/Dockerfile
+    container_name: q3_filter_06092022_15092022_1
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - RABBITMQ_HOST=rabbitmq
+    - N_UPSTREAM=1
+    - N_UPSTREAM=3
+    - INPUT_EXCHANGE=q3_reduced_data_exc
+    - SHARD_ID=1
+    - OUTPUT_EXCHANGE=q3_transactions_exc
+    - OUTPUT_SHARDS=3
+    - FILTER_FIELD=Timestamp
+    - FILTER_OP=in
+    - FILTER_VALUE=["2022/09/06", "2022/09/15"]
+    - ROUTING_FIELD=client_id
+  q3_filter_06092022_15092022_2:
+    build:
+      context: ./src
+      dockerfile: filters/Dockerfile
+    container_name: q3_filter_06092022_15092022_2
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - RABBITMQ_HOST=rabbitmq
+    - N_UPSTREAM=1
+    - N_UPSTREAM=3
+    - INPUT_EXCHANGE=q3_reduced_data_exc
+    - SHARD_ID=2
+    - OUTPUT_EXCHANGE=q3_transactions_exc
+    - OUTPUT_SHARDS=3
+    - FILTER_FIELD=Timestamp
+    - FILTER_OP=in
+    - FILTER_VALUE=["2022/09/06", "2022/09/15"]
+    - ROUTING_FIELD=client_id
+  q3_splitter_by_payment_method_0:
+    build:
+      context: ./src
+      dockerfile: aggregators/Dockerfile
+    container_name: q3_splitter_by_payment_method_0
     depends_on:
       rabbitmq:
         condition: service_healthy
     entrypoint:
     - python3
-    - money_converter_api.py
+    - /app/splitter.py
     environment:
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - N_UPSTREAM=1
-    - INPUT_QUEUE=q5_reqs_currency_rates_api
-    - OUTPUT_QUEUE=q5_currency_rates_from_api
-  q5_payment_fmt_filter_0:
-    build:
-      context: ./src
-      dockerfile: filters/Dockerfile
-    container_name: q5_payment_fmt_filter_0
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-    environment:
-    - RABBITMQ_HOST=rabbitmq
-    - N_UPSTREAM=1
-    - N_UPSTREAM=1
-    - INPUT_QUEUE=q5_small_amounts_transactions
-    - OUTPUT_QUEUE=q5_countable_transactions
-    - FILTER_FIELD=Payment Format
-    - FILTER_OP=in
-    - FILTER_VALUE=["Wire", "ACH"]
-  q5_transaction_counter_0:
+    - INPUT_EXCHANGE=q3_splitter_exc
+    - SHARD_ID=0
+    - OUTPUT_EXCHANGE=q3_split_by_payment_method_exc
+    - N_UPSTREAM=3
+    - OUTPUT_SHARDS=3
+    - SHARD_KEY_FIELD=Payment Format
+  q3_splitter_by_payment_method_1:
     build:
       context: ./src
       dockerfile: aggregators/Dockerfile
-    container_name: q5_transaction_counter_0
+    container_name: q3_splitter_by_payment_method_1
     depends_on:
       rabbitmq:
         condition: service_healthy
+    entrypoint:
+    - python3
+    - /app/splitter.py
     environment:
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
-    - INPUT_QUEUE=q5_totals_reached
-    - OUTPUT_QUEUE=results_3
-    - AGG_OP=sum
-    - AGG_FIELD=count
+    - INPUT_EXCHANGE=q3_splitter_exc
+    - SHARD_ID=1
+    - OUTPUT_EXCHANGE=q3_split_by_payment_method_exc
+    - N_UPSTREAM=3
+    - OUTPUT_SHARDS=3
+    - SHARD_KEY_FIELD=Payment Format
+  q3_splitter_by_payment_method_2:
+    build:
+      context: ./src
+      dockerfile: aggregators/Dockerfile
+    container_name: q3_splitter_by_payment_method_2
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    entrypoint:
+    - python3
+    - /app/splitter.py
+    environment:
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - INPUT_EXCHANGE=q3_splitter_exc
+    - SHARD_ID=2
+    - OUTPUT_EXCHANGE=q3_split_by_payment_method_exc
+    - N_UPSTREAM=3
+    - OUTPUT_SHARDS=3
+    - SHARD_KEY_FIELD=Payment Format
   rabbitmq:
     build:
       context: ./src/rabbitmq
@@ -465,7 +671,7 @@ services:
     - FILTER_FIELD=Payment Currency
     - FILTER_OP=eq
     - FILTER_VALUE=US Dollar
-    - TOTAL_CLIENTS=1
+    - TOTAL_CLIENTS=2
   usd_filter_1:
     build:
       context: ./src
@@ -485,4 +691,4 @@ services:
     - FILTER_FIELD=Payment Currency
     - FILTER_OP=eq
     - FILTER_VALUE=US Dollar
-    - TOTAL_CLIENTS=1
+    - TOTAL_CLIENTS=2

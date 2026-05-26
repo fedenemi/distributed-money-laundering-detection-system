@@ -223,4 +223,5 @@ class FilterWorker(WorkerBase):
 
 
     def on_eof(self, client_id=None):
+        logger.info("EOF received for client_id=%s", client_id)
         return []

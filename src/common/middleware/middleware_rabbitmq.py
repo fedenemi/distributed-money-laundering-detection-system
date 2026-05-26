@@ -20,8 +20,16 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
     
     def start_consuming(self, on_message_callback):
         def callback_wrapper(ch, method, properties, body):
-            def ack(): ch.basic_ack(delivery_tag=method.delivery_tag)
-            def nack(): ch.basic_nack(delivery_tag=method.delivery_tag)
+            def ack():
+                try:
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+                except Exception:
+                    pass
+            def nack():
+                try:
+                    ch.basic_nack(delivery_tag=method.delivery_tag)
+                except Exception:
+                    pass
             on_message_callback(body, ack, nack)
         try:
             #self.channel.basic_qos(prefetch_count=1)

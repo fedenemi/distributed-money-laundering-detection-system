@@ -70,13 +70,19 @@ def _normalize_result_rows(rows, query_id, bank_maps, client_id):
             }
         
         elif query_id == 3:
-            # Q3: from_bank, from_account, payment_format, amount
+            # Q3: from_bank, from_account, payment_format, amount            
             mapped = {
                 "from_bank": row.get("From Bank", ""),
                 "from_account": row.get("Account", ""),
                 "payment_format": row.get("Payment Format", ""),
                 "amount": row.get("Amount Paid", 0),
             }
+
+        elif query_id == 5:
+            # Q5: count o sum_count
+            mapped = {
+                    "count": int(row.get("sum_count", row.get("count", 0))),
+                }
 
         else:
             # Para queries aún no implementadas, pasamos las claves originales (quitando client_id)
