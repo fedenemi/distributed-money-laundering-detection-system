@@ -19,7 +19,7 @@ q4_graphs_edges_splitters,1
 q4_paths_creators,1
 q4_paths_splitters_by_ends,1
 q4_unique_paths_counters,1
-q5_data_reducer,1
+q5_data_reducer,3
 q5_filter_01092022_05092022,1
 q5_money_converter,1
 q5_money_converter_api_client,1

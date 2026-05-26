@@ -1,6 +1,9 @@
 build:
   context: ./src
   dockerfile: money_converter/Dockerfile
+depends_on:
+  rabbitmq:
+    condition: service_healthy
 container_name: money_converter_api_client
 entrypoint:
 - python3

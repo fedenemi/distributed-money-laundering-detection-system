@@ -1,9 +1,11 @@
+import csv
 import logging
 import os
 
 from common.middleware.double_io_worker_base import WorkerBaseDoubleIO
 
 TARGET_CURRENCY_TAG = "TARGET_CURRENCY"
+BTC_RATES_PATH_TAG = "BTC_RATES_PATH"
 
 CURRENCY_CODES = {
     "US Dollar": "USD", "Euro": "EUR", "Yuan": "CNY",
@@ -11,6 +13,8 @@ CURRENCY_CODES = {
     "Swiss Franc": "CHF", "Australian Dollar": "AUD",
     "Canadian Dollar": "CAD", "Mexican Peso": "MXN",
     "Brazil Real": "BRL", "Rupee": "INR", "Saudi Riyal": "SAR",
+    "Bitcoin": "BTC",
+    "Shekel": "ILS",
 }
 
 class MoneyConverter(WorkerBaseDoubleIO):
@@ -24,58 +28,85 @@ class MoneyConverter(WorkerBaseDoubleIO):
         # Currency rates by date
         self._currency_rates_by_date = {}
         self._current_prev_row_analyzed = 0
+        self._btc_rates_by_day = self._load_btc_rates()
 
-    def _generate_consult_currency_rate(self, datetime, origin_curr, dest_curr):
-        return {"datetime" : datetime, "origin" : origin_curr, "destination" : dest_curr}
+    def _load_btc_rates(self):
+        path = os.environ.get(BTC_RATES_PATH_TAG, "/btc_rates.csv")
+        rates = {}
+        try:
+            with open(path, newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    day = str(row.get("date", "")).strip().replace("/", "-")
+                    rate = row.get("rate")
+                    if day and rate:
+                        rates[day] = float(rate)
+        except Exception:
+            logging.exception("No se pudo cargar BTC rates")
+        return rates
+
+    def _generate_consult_currency_rate(self, timestamp, origin_curr, dest_curr):
+        return {"timestamp": timestamp, "origin": origin_curr, "destination": dest_curr}
 
     def process_main_input(self, data: dict) -> tuple[list, list]:
         # Get data elements
         data_copy = data.copy()
-        datetime = data["Timestamp"]
-        origin_curr = data["Received Currency"]
-        dest_curr = data["Payment Currency"]
+        timestamp = data["Timestamp"]
+        day = str(timestamp).split(" ")[0].replace("/", "-")
+        origin_curr = data["Payment Currency"]
+        origin_code = CURRENCY_CODES.get(origin_curr, origin_curr)
+        target_code = CURRENCY_CODES.get(self._target_currency, self._target_currency)
+        rate_key = (origin_code, target_code)
         currency_rate_req = []
 
-        if datetime not in self._currency_rates_by_date or \
-                (origin_curr, dest_curr) not in self._currency_rates_by_date[datetime]:
-            currency_rate_req.append(self._generate_consult_currency_rate(datetime, origin_curr, self._target_currency))
-        else:
+        if origin_code == target_code:
             data_copy["Payment Currency"] = self._target_currency
-            data_copy["Amount Paid"] = float(data["Amount Paid"]) * self._currency_rates_by_date[datetime][(origin_curr, dest_curr)]
+            return ([], [data_copy])
 
-        return (currency_rate_req, [data_copy])
+        if origin_code == "BTC" and target_code == "USD":
+            rate = self._btc_rates_by_day.get(day)
+            if rate is None:
+                logging.warning("BTC rate no disponible para %s", day)
+                return ([], [])
+            data_copy["Payment Currency"] = self._target_currency
+            data_copy["Amount Paid"] = float(data["Amount Paid"]) * rate
+            return ([], [data_copy])
+
+        if day not in self._currency_rates_by_date or \
+                rate_key not in self._currency_rates_by_date[day]:
+            currency_rate_req.append(
+                self._generate_consult_currency_rate(day, origin_code, target_code)
+            )
+            return (currency_rate_req, [data_copy])
+
+        rate = self._currency_rates_by_date[day][rate_key]
+        data_copy["Payment Currency"] = self._target_currency
+        data_copy["Amount Paid"] = float(data["Amount Paid"]) * rate
+        return ([], [data_copy])
 
 
     def process_secondary_input(self, data: dict, prev_stage_data: list) -> tuple[list, list]:
         new_data_list = []
 
         if "Type" not in data:
-            prev_stage_data_row = prev_stage_data[self._current_prev_row_analyzed].copy()
-            while self._current_prev_row_analyzed < len(prev_stage_data):
-                datetime = data["timestamp"]
-                origin_curr = data["origin"]
-                dest_curr = data["destination"]
+            day = data["timestamp"]
+            origin_code = data["origin"]
+            target_code = data["destination"]
+            currency_rate = data["conversion_rate"]
 
-                if prev_stage_data_row["Timestamp"] == datetime and \
-                        prev_stage_data_row["Received Currency"] == origin_curr and \
-                        prev_stage_data_row["Payment Currency"] == dest_curr:
-                    currency_rate = data["conversion_rate"]
+            self._currency_rates_by_date.setdefault(day, {})
+            self._currency_rates_by_date[day][(origin_code, target_code)] = currency_rate
 
-                    # Change data to send
-                    prev_stage_data_row["Amount Paid"] = str(currency_rate * float(prev_stage_data["Amount Paid"]))
-                    prev_stage_data_row["Payment Currency"] = self._target_currency
+            for row in prev_stage_data:
+                row_copy = row.copy()
+                row_day = str(row_copy["Timestamp"]).split(" ")[0].replace("/", "-")
+                row_origin = CURRENCY_CODES.get(row_copy["Payment Currency"], row_copy["Payment Currency"])
 
-                    # If data was not stored, store it
-                    self._currency_rates_by_date.setdefault(datetime, {})
-                    self._currency_rates_by_date[datetime].setdefault((origin_curr, dest_curr), {})
-                    self._currency_rates_by_date[datetime][(origin_curr, dest_curr)] = currency_rate
+                if row_day == day and row_origin == origin_code:
+                    row_copy["Amount Paid"] = str(currency_rate * float(row_copy["Amount Paid"]))
+                    row_copy["Payment Currency"] = self._target_currency
 
-                    new_data_list.append(prev_stage_data_row)
-                    self._current_prev_row_analyzed += 1
-                    break
-
-                new_data_list.append(prev_stage_data_row)
-                self._current_prev_row_analyzed += 1
+                new_data_list.append(row_copy)
 
         return ([], new_data_list)
 
@@ -86,4 +117,4 @@ if __name__ == "__main__":
     logger = logging.getLogger(__file__)
     logger.setLevel(logging.INFO)
     money_converter = MoneyConverter()
-    money_converter.start()
+    money_converter.run()

@@ -172,7 +172,7 @@ def generate_system_docker_compose(total_clients=0):
         system = system | data_reducers_q3
 
         # Filter data by date
-        #Filter dates between 06/09/2022 and 15/09/2022 included
+        # Filter dates between 06/09/2022 and 15/09/2022 included
         q3_filters_06092022_15092022 = get_filters_docker_services(
             q3_filter_06092022_15092022_prefix, q3_filter_06092022_15092022_instances,
             filter_field="Timestamp", filter_op="in", filter_value='["2022/09/06", "2022/09/15"]',
@@ -327,11 +327,11 @@ def generate_system_docker_compose(total_clients=0):
         # QUERY 5
         # =========================================================
 
-        # # Data reducers
+        # Data reducers
         # q5_data_reducers = get_data_reducer_docker_services(
         #     q5_data_reducer_prefix, q5_data_reducer_instances,
-        #     ["Timestamp", "From Bank", "Account", "To Bank", "Account.1", "Amount Paid"],
-        #     input_queue="cleaned_data",
+        #     ["Timestamp", "Amount Paid", "Payment Currency", "Payment Format"],
+        #     input_exchange="gateway_exc",
         #     output_queue="q5_reduced_data",
         # )
         # system = system | q5_data_reducers
@@ -351,8 +351,10 @@ def generate_system_docker_compose(total_clients=0):
         #     main_input_queue="q5_converter_to_usd",
         #     sec_input_queue="q5_currency_rates_from_api",
         #     main_output_queue="q5_reqs_currency_rates_api",
-        #     sec_output_queue="q5_filter_lt_1_usd",
+        #     sec_output_queue="q5_converted_amounts_transactions",
         # )
+        # for name, config in q5_money_converters.items():
+        #     config["environment"].append("BATCH_SIZE=1")
         # system = system | q5_money_converters
 
         # q5_money_converters_api_client = get_money_conversion_api_client_docker_services(
@@ -374,7 +376,7 @@ def generate_system_docker_compose(total_clients=0):
         # # Filter by payment methods
         # q5_payment_fmt_filters = get_filters_docker_services(
         #     q5_payment_fmt_filters_prefix, q5_payment_fmt_filters_instances,
-        #     filter_field="Payment Method", filter_op="in", filter_value='["Wire", "ACH"]',
+        #     filter_field="Payment Format", filter_op="in", filter_value='["Wire", "ACH"]',
         #     input_queue="q5_small_amounts_transactions",
         #     output_queue="q5_countable_transactions"
         # )
