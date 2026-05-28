@@ -12,6 +12,7 @@ Variables de entorno:
   MAIN_INPUT_EXCHANGE: exchange de entrada principal (si consume de shard)
   SECONDARY_INPUT_QUEUE: cola de entrada secundaria (si consume de cola simple)
   SECONDARY_INPUT_EXCHANGE: exchange de entrada secundaria (si consume de shard)
+  CONSUMER_GROUP  : nombre logico de la etapa consumidora del exchange
   SHARD_ID        : id del shard de este worker
   N_UPSTREAM_MAIN : cantidad de EOFs a esperar de la entrada principal
   N_UPSTREAM_SECONDARY : cantidad de EOFs a esperar de la entrada secundaria
@@ -34,7 +35,7 @@ import multiprocessing
 import hashlib
 import random
 
-from common.middleware.middleware_rabbitmq import MessageMiddlewareQueueRabbitMQ
+from common.middleware.middleware_rabbitmq import MessageMiddlewareQueueRabbitMQ, _connection_parameters
 from common.middleware.middleware_sharded import ShardedExchangeConsumer, ShardedExchangeProducer
 from common.middleware.middleware import MessageMiddlewareDisconnectedError, MessageMiddlewareMessageError
 
@@ -49,7 +50,7 @@ def _wait_for_rabbitmq():
     while True:
         try:
             import pika
-            conn = pika.BlockingConnection(pika.ConnectionParameters(host=RABBITMQ_HOST))
+            conn = pika.BlockingConnection(_connection_parameters(RABBITMQ_HOST))
             conn.close()
             return
         except Exception:
@@ -62,6 +63,7 @@ class WorkerBaseDoubleIO:
     def __init__(self):
         self.batch_size      = int(os.environ.get("BATCH_SIZE", "500"))
         self.total_clients   = int(os.environ.get("TOTAL_CLIENTS", "0"))
+        self.consumer_group  = os.environ.get("CONSUMER_GROUP", self.__class__.__name__)
 
         self.main_n_upstream = int(os.environ.get("MAIN_N_UPSTREAM", "1"))
         self.sec_n_upstream  = int(os.environ.get("SECONDARY_N_UPSTREAM", "1"))
@@ -179,6 +181,9 @@ class WorkerBaseDoubleIO:
         return []
     
     def on_both_eof_received(self, client_id=None) -> list:
+        return []
+    
+    def on_secondary_ready(self, client_id=None) -> list:
         return []
 
     def _routing_key(self, msg: dict) -> str:
@@ -363,6 +368,13 @@ class WorkerBaseDoubleIO:
                 main_ready = self._clients_eof_main_input.get(client_id, 0) >= self.main_n_upstream
                 sec_ready = self._clients_eof_sec_input.get(client_id, 0) >= self.sec_n_upstream
                 
+                if sec_ready and not self._clients_secondary_ready.get(client_id, False):
+                    self._clients_secondary_ready[client_id] = True
+
+                    for result in self.on_secondary_ready(client_id):
+                        self._emit_main_output([result])
+                    self._flush_all_main_buffer()
+                
                 if main_ready and sec_ready:
                     self._clients_joined[client_id] = True
                     
@@ -383,6 +395,10 @@ class WorkerBaseDoubleIO:
                     client_id = msg.get("client_id")
                     if client_id is None:
                         eof_count[0] += 1
+                        logger.info(
+                            f"{self.__class__.__name__} EOF main recibido "
+                            f"({eof_count[0]}/{self.main_n_upstream})"
+                        )
                         ack()
                         if eof_count[0] >= self.main_n_upstream:
                             self._execute_eof_main_input(None)
@@ -391,6 +407,10 @@ class WorkerBaseDoubleIO:
                         return
 
                     self._clients_eof_main_input[client_id] = self._clients_eof_main_input.get(client_id, 0) + 1
+                    logger.info(
+                        f"{self.__class__.__name__} EOF main recibido para client_id={client_id} "
+                        f"({self._clients_eof_main_input[client_id]}/{self.main_n_upstream})"
+                    )
                     self._execute_eof_main_input(client_id)
                     ack()
                     return
@@ -400,7 +420,8 @@ class WorkerBaseDoubleIO:
                         if self._operation_mode == "PIPELINE":
                             self._emit_results_main_stage(self.process_main_input(row))
                         else:
-                            self.process_main_input(row)
+                            results, _ = self.process_main_input(row)
+                            self._emit_main_output(results)
                     ack()
             except Exception as e:
                 logger.error(f"Error procesando mensaje: {e}")
@@ -434,6 +455,10 @@ class WorkerBaseDoubleIO:
                     client_id = msg.get("client_id")
                     if client_id is None:
                         eof_count[0] += 1
+                        logger.info(
+                            f"{self.__class__.__name__} EOF secondary recibido "
+                            f"({eof_count[0]}/{self.sec_n_upstream})"
+                        )
                         ack()
                         if eof_count[0] >= self.sec_n_upstream:
                             self._execute_eof_sec_input(None)
@@ -442,6 +467,10 @@ class WorkerBaseDoubleIO:
                         return
 
                     self._clients_eof_sec_input[client_id] = self._clients_eof_sec_input.get(client_id, 0) + 1
+                    logger.info(
+                        f"{self.__class__.__name__} EOF secondary recibido para client_id={client_id} "
+                        f"({self._clients_eof_sec_input[client_id]}/{self.sec_n_upstream})"
+                    )
                     self._execute_eof_sec_input(client_id)
                     ack()
                     return
@@ -479,24 +508,29 @@ class WorkerBaseDoubleIO:
 
     def _create_main_consumer(self):
         if self.main_input_exchange and self.shard_id >= 0:
-            return ShardedExchangeConsumer(RABBITMQ_HOST, self.main_input_exchange, self.shard_id)
+            return ShardedExchangeConsumer(
+                RABBITMQ_HOST, self.main_input_exchange, self.shard_id, self.consumer_group
+            )
         if self.main_input_queue:
             return MessageMiddlewareQueueRabbitMQ(RABBITMQ_HOST, self.main_input_queue)
         raise ValueError("Se requiere MAIN_INPUT_QUEUE o MAIN_INPUT_EXCHANGE + SHARD_ID")
 
     def _create_sec_consumer(self):
         if self.sec_input_exchange and self.shard_id >= 0:
-            return ShardedExchangeConsumer(RABBITMQ_HOST, self.sec_input_exchange, self.shard_id)
+            return ShardedExchangeConsumer(
+                RABBITMQ_HOST, self.sec_input_exchange, self.shard_id, self.consumer_group
+            )
         if self.sec_input_queue:
             return MessageMiddlewareQueueRabbitMQ(RABBITMQ_HOST, self.sec_input_queue)
         raise ValueError("Se requiere SECONDARY_INPUT_QUEUE o SECONDARY_INPUT_EXCHANGE + SHARD_ID")
 
-    def run_main_process(self, clients_eof_main, clients_eof_sec, clients_joined, eof_lock, channel_stages):
+    def run_main_process(self, clients_eof_main, clients_eof_sec, clients_joined, clients_secondary_ready, eof_lock, channel_stages):
         logging.basicConfig(level=logging.INFO)
         # Shared variables
         self._clients_eof_main_input = clients_eof_main
         self._clients_eof_sec_input = clients_eof_sec
         self._clients_joined = clients_joined
+        self._clients_secondary_ready = clients_secondary_ready
         self._eof_lock = eof_lock
         self._channel_stages = channel_stages
 
@@ -542,12 +576,13 @@ class WorkerBaseDoubleIO:
         # Handle inputs
         self.handle_message_main_input()
 
-    def run_sec_process(self, clients_eof_main, clients_eof_sec, clients_joined, eof_lock, channel_stages):
+    def run_sec_process(self, clients_eof_main, clients_eof_sec, clients_joined, clients_secondary_ready, eof_lock, channel_stages):
         logging.basicConfig(level=logging.INFO)
         # Shared variables
         self._clients_eof_main_input = clients_eof_main
         self._clients_eof_sec_input = clients_eof_sec
         self._clients_joined = clients_joined
+        self._clients_secondary_ready = clients_secondary_ready
         self._eof_lock = eof_lock
         self._channel_stages = channel_stages
 
@@ -603,17 +638,18 @@ class WorkerBaseDoubleIO:
         clients_eof_main = manager.dict()
         clients_eof_sec = manager.dict()
         clients_joined = manager.dict()
+        clients_secondary_ready = manager.dict()
         eof_lock = multiprocessing.Lock()
         channel_stages = multiprocessing.Queue()
 
         # Create processes
         main_process = multiprocessing.Process(
             target=self.run_main_process, 
-            args=(clients_eof_main, clients_eof_sec, clients_joined, eof_lock, channel_stages)
+            args=(clients_eof_main, clients_eof_sec, clients_joined, clients_secondary_ready, eof_lock, channel_stages)
         )
         sec_process = multiprocessing.Process(
             target=self.run_sec_process,
-            args=(clients_eof_main, clients_eof_sec, clients_joined, eof_lock, channel_stages)
+            args=(clients_eof_main, clients_eof_sec, clients_joined, clients_secondary_ready, eof_lock, channel_stages)
         )
 
         def _handle_sigterm(*_):

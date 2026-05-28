@@ -51,7 +51,7 @@ class DataReducer(WorkerBase):
         else:
             logger.warning("client_id no encontrado en data, no se incluirá en el resultado reducido")
         
-        logger.info(f"Reducing data {data} to {reduced}")
+        logger.debug(f"Reducing data {data} to {reduced}")
         return [reduced]
 
     def on_eof(self, client_id=None):

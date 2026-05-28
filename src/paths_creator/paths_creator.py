@@ -25,10 +25,13 @@ class PathsCreator(WorkerBase):
 
     # Process data message
     def process(self, data):
-        logging.info("Arista recibida")
+        logging.debug(f"data recibido: {data}")
         # Get edge's dictionaries of according to client ID
         client_id = data["client_id"]
-        edges_pair = self.edges_by_client_id.get(client_id, ({}, {}))
+        edges_pair = self.edges_by_client_id.get(client_id)
+        if edges_pair is None:
+            edges_pair = ({}, {})
+            self.edges_by_client_id[client_id] = edges_pair
         incoming_edges = edges_pair[0]
         outgoing_edges = edges_pair[1]
 
@@ -51,20 +54,25 @@ class PathsCreator(WorkerBase):
             if destination not in incoming_edges:
                 incoming_edges[destination] = set()
             incoming_edges[destination].add(origin)
-            logging.info("Arista de entrada guardada")
+            logging.debug("Arista de entrada guardada")
         else:
             if origin not in outgoing_edges:
                 outgoing_edges[origin] = set()
             outgoing_edges[origin].add(destination)
-            logging.info("Arista de salida guardada")
+            logging.debug("Arista de salida guardada")
 
         return []
 
 
     # Process EOF
     def on_eof(self, client_id=None):
-        logging.info("EOF recibido")
-        edges_pair = self.edges_by_client_id[client_id]
+        logging.info(f"EOF received for client_id={client_id}")
+
+        edges_pair = self.edges_by_client_id.get(client_id)
+        if edges_pair is None:
+            logging.info(f"No hay edges para client_id={client_id} en EOF")
+            return []
+
         incoming_edges = edges_pair[0]
         outgoing_edges = edges_pair[1]
 
@@ -89,6 +97,7 @@ class PathsCreator(WorkerBase):
 
                         # Generate new data row
                         yield {
+                            "client_id" : client_id,
                             TRANSACTION_ORIGIN_BANK_KEY : inc_bank,
                             TRANSACTION_ORIGIN_ACC_KEY : inc_acc,
                             TRANSACTION_INTERMEDIATE_BANK_KEY : interm_bank,

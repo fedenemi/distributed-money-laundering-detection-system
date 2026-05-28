@@ -2,7 +2,10 @@ FROM python:3-alpine
 
 RUN pip3 install pika
 
+WORKDIR /app
 COPY common ./common
-COPY paths_creator .
+COPY paths_creator ./paths_creator
 
-ENTRYPOINT ["python3", "main.py"]
+ENV PYTHONPATH=/app:/app/common
+
+ENTRYPOINT ["python3", "-m", "paths_creator.main"]

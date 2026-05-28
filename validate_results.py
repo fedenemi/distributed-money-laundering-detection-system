@@ -98,10 +98,20 @@ def to_usd(amount, currency, timestamp):
 # Carga de datos ----------------------------------------------------------
 
 def load_transactions(path):
+    print(f"Cargando transacciones desde {path}...")
     rows = []
     with open(path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for r in reader:
+        reader = csv.reader(f)
+        raw_headers = next(reader, [])
+        seen_headers = defaultdict(int)
+        headers = []
+        for header in raw_headers:
+            count = seen_headers[header]
+            headers.append(header if count == 0 else f"{header}.{count}")
+            seen_headers[header] += 1
+
+        for raw_row in reader:
+            r = dict(zip(headers, raw_row))
             try:
                 rows.append({
                     "timestamp":        r["Timestamp"],
@@ -186,21 +196,34 @@ def serial_q4(rows):
     usd_a = [r for r in rows
              if r["payment_currency"] == "US Dollar"
              and in_period(r["timestamp"], "2022-09-01", "2022-09-05")]
-    out_e = defaultdict(set)
-    in_e  = defaultdict(set)
-    for r in usd_a:
-        out_e[r["from_account"]].add(r["to_account"])
-        in_e[r["to_account"]].add(r["from_account"])
-    pairs = defaultdict(set)
-    for b, origins in in_e.items():
-        for a in origins:
-            for c in out_e.get(b, set()):
-                if a != c:
-                    pairs[(a, c)].add(b)
+
+    edges = [
+        (
+            (r["from_bank"], r["from_account"]),
+            (r["to_bank"], r["to_account"]),
+        )
+        for r in usd_a
+    ]
+
+    outgoing_by_node = defaultdict(list)
+    for origin, destination in edges:
+        outgoing_by_node[origin].append(destination)
+
+    pair_counts = defaultdict(int)
+    for origin, intermediate in edges:
+        for destination in outgoing_by_node.get(intermediate, []):
+            if origin != destination:
+                pair_counts[(origin, destination)] += 1
+
+    unique_accounts = set()
+    for (origin, destination), size in pair_counts.items():
+        if size > 5:
+            unique_accounts.add(origin)
+            unique_accounts.add(destination)
+
     return [
-        {"origin": a, "destination": c, "n_intermediaries": len(bs)}
-        for (a, c), bs in pairs.items()
-        if len(bs) >= 5 and len(out_e.get(a, set())) >= 5
+        {"bank": bank, "account": account}
+        for bank, account in sorted(unique_accounts)
     ]
 
 def serial_q5(rows):
@@ -225,6 +248,8 @@ def normalize(rows):
         for k, v in r.items():
             if isinstance(v, float):
                 v = round(v, 4)
+                if v.is_integer():
+                    v = int(v)
             items.append((k, str(v)))
         result.add(tuple(sorted(items)))
     return result

@@ -78,11 +78,19 @@ def _normalize_result_rows(rows, query_id, bank_maps, client_id):
                 "amount": row.get("Amount Paid", 0),
             }
 
+        elif query_id == 4:
+            # Q4: cuentas endpoint que cumplen scatter-gather
+            mapped = {
+                "bank": row.get("Bank", ""),
+                "account": row.get("Account", ""),
+            }
+
         elif query_id == 5:
             # Q5: count o sum_count
+            count = row.get("sum_count", row.get("count", 0))
             mapped = {
-                    "count": int(row.get("sum_count", row.get("count", 0))),
-                }
+                "count": int(float(count)),
+            }
 
         else:
             # Para queries aún no implementadas, pasamos las claves originales (quitando client_id)
@@ -154,7 +162,7 @@ def handle_client_response(
             if isinstance(payload, dict) and payload.get("type") == "eof":
                 rows = []
                 client_id = _extract_client_id(payload, rows, client_sockets)
-                if not client_id:
+                if client_id is None:
                     raise ValueError("Missing client_id in EOF message")
                 if not client_ready.get(client_id, False):
                     time.sleep(0.2)
@@ -200,7 +208,7 @@ def handle_client_response(
             else:
                 raise TypeError("Unsupported result payload")
 
-            if not client_id:
+            if client_id is None:
                 raise ValueError("Missing client_id in result payload")
 
             done_queries = client_query_eofs.get(client_id, [])

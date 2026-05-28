@@ -78,6 +78,12 @@ class Client:
             csvfile.close()
         self._writers = {}
 
+    def _clear_previous_results(self, output_dir):
+        self._close_writers()
+        for filename in os.listdir(output_dir):
+            if filename.startswith("results_q") and filename.endswith(".csv"):
+                os.remove(os.path.join(output_dir, filename))
+
     # ACK con traceback    
     def _expect_ack(self):
         try:
@@ -94,7 +100,7 @@ class Client:
                     f"(got={payload}, expected={self.client_id})"
                 )
 
-            logging.info("Received ACK from gateway")
+            logging.debug("Received ACK from gateway")
 
         except Exception as e:
             logging.error(f"ACK failure: {e}")
@@ -106,7 +112,7 @@ class Client:
         for row in rows:
             batch.append(row)
             if len(batch) >= self.batch_size:
-                logging.info(f"Sending batch of {len(batch)} rows to gateway")
+                logging.debug(f"Sending batch of {len(batch)} rows to gateway")
                 message_protocol.external.send_msg(
                     self.server_socket, msg_type, self.client_id, batch
                 )
@@ -114,7 +120,7 @@ class Client:
                 batch = []
 
         if batch:
-            logging.info(f"Sending final batch of {len(batch)} rows to gateway")
+            logging.debug(f"Sending final batch of {len(batch)} rows to gateway")
             message_protocol.external.send_msg(
                 self.server_socket, msg_type, self.client_id, batch
             )
@@ -159,6 +165,7 @@ class Client:
         logging.info("Receiving query results")
         output_dir = os.path.join(self.results_dir, f"client_{self.client_id}")
         os.makedirs(output_dir, exist_ok=True)
+        self._clear_previous_results(output_dir)
 
         while True:
             msg_type, payload = message_protocol.external.recv_msg(self.server_socket)

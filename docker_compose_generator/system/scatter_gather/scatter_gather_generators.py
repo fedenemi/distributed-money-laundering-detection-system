@@ -28,6 +28,7 @@ DOCKER_ENV_VARS_NAME = "environment"
 ## I/O
 INPUT_QUEUE_TAG = "INPUT_QUEUE"
 INPUT_EXCHANGE_TAG = "INPUT_EXCHANGE"
+CONSUMER_GROUP_TAG = "CONSUMER_GROUP"
 N_UPSTREAM_TAG="N_UPSTREAM"
 SHARD_ID_TAG="SHARD_ID"
 OUTPUT_QUEUE_TAG = "OUTPUT_QUEUE"
@@ -71,6 +72,7 @@ def get_scatter_gather_services(
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{INPUT_QUEUE_TAG}={input_queue}")
         elif input_exchange is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{INPUT_EXCHANGE_TAG}={input_exchange}")
+            new_service_config[DOCKER_ENV_VARS_NAME].append(f"{CONSUMER_GROUP_TAG}={service_prefix}")
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{SHARD_ID_TAG}={i}")
 
         if output_queue is not None:

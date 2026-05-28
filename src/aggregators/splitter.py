@@ -47,6 +47,7 @@ class Splitter(WorkerBase):
         return [data]
 
     def on_eof(self, client_id=None):
+        logger.info(f"EOF received for client_id={client_id}")
         return iter([])
 
 

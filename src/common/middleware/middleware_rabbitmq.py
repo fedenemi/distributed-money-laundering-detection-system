@@ -1,15 +1,26 @@
 import pika
 import random
 import string
+import os
 
 import pika.exceptions
 from .middleware import MessageMiddlewareQueue, MessageMiddlewareExchange, MessageMiddlewareCloseError, MessageMiddlewareDisconnectedError, MessageMiddlewareMessageError
+
+RABBITMQ_HEARTBEAT = int(os.environ.get("RABBITMQ_HEARTBEAT", "3600"))
+RABBITMQ_BLOCKED_CONNECTION_TIMEOUT = int(os.environ.get("RABBITMQ_BLOCKED_CONNECTION_TIMEOUT", "3600"))
+
+def _connection_parameters(host):
+    return pika.ConnectionParameters(
+        host=host,
+        heartbeat=RABBITMQ_HEARTBEAT,
+        blocked_connection_timeout=RABBITMQ_BLOCKED_CONNECTION_TIMEOUT,
+    )
 
 class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
 
     def __init__(self, host, queue_name):
         try:
-            self.connection = pika.BlockingConnection(pika.ConnectionParameters(host=host))
+            self.connection = pika.BlockingConnection(_connection_parameters(host))
             self.channel = self.connection.channel()
             self.queue_name = queue_name
             self.channel.queue_declare(queue=queue_name)
@@ -74,21 +85,26 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
 
 class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
     
-    def __init__(self, host, exchange_name, routing_keys):
+    def __init__(self, host, exchange_name, routing_keys, queue_name="", durable=False, exclusive=True):
         try:
-            self.connection = pika.BlockingConnection(pika.ConnectionParameters(host=host))
+            self.connection = pika.BlockingConnection(_connection_parameters(host))
             self.channel = self.connection.channel()
 
             self.channel.exchange_declare(exchange=exchange_name, exchange_type='direct', durable=True)
             self.exchange_name = exchange_name
 
-            result = self.channel.queue_declare(queue='', exclusive=True)
-            self.queue_name = result.method.queue
+            result = self.channel.queue_declare(
+                queue=queue_name,
+                durable=durable,
+                exclusive=exclusive,
+            )
+            self.queue_name = queue_name or result.method.queue
 
             self.routing_keys = routing_keys
 
             for key in routing_keys:
                 self.channel.queue_bind(self.queue_name, exchange_name, key)
+            self.channel.basic_qos(prefetch_count=1)
                 
 
         except Exception:
@@ -107,7 +123,12 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
             self.channel.basic_consume(queue=self.queue_name, on_message_callback=callback_wrapper, auto_ack=False)
             self.channel.start_consuming()
 
-        except pika.exceptions.AMQPConnectionError:
+        except (
+            pika.exceptions.AMQPConnectionError,
+            pika.exceptions.AMQPChannelError,
+            pika.exceptions.ChannelWrongStateError,
+            pika.exceptions.StreamLostError,
+        ):
             raise MessageMiddlewareDisconnectedError
         
         except Exception:
@@ -117,7 +138,12 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
         try:
             if self.channel.is_open:
                 self.channel.stop_consuming()
-        except pika.exceptions.AMQPConnectionError:
+        except (
+            pika.exceptions.AMQPConnectionError,
+            pika.exceptions.AMQPChannelError,
+            pika.exceptions.ChannelWrongStateError,
+            pika.exceptions.StreamLostError,
+        ):
             raise MessageMiddlewareDisconnectedError
 
     def send(self, message):
@@ -128,7 +154,12 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
                 body=message,
             )
 
-        except pika.exceptions.AMQPConnectionError:
+        except (
+            pika.exceptions.AMQPConnectionError,
+            pika.exceptions.AMQPChannelError,
+            pika.exceptions.ChannelWrongStateError,
+            pika.exceptions.StreamLostError,
+        ):
             raise MessageMiddlewareDisconnectedError
         
         except pika.exceptions.ChannelWrongStateError:

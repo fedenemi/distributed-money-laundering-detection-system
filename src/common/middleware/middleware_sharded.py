@@ -3,7 +3,7 @@ Extensión del middleware existente para soportar sharding.
 """
 import pika
 import pika.exceptions
-from .middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ
+from .middleware_rabbitmq import MessageMiddlewareExchangeRabbitMQ, _connection_parameters
 from .middleware import MessageMiddlewareDisconnectedError, MessageMiddlewareMessageError
 
 
@@ -21,18 +21,12 @@ class ShardedExchangeProducer:
         self.n_shards = n_shards
         try:
             self.connection = pika.BlockingConnection(
-                pika.ConnectionParameters(host=host)
+                _connection_parameters(host)
             )
             self.channel = self.connection.channel()
             self.channel.exchange_declare(
                 exchange=exchange_name, exchange_type="direct", durable=True
             )
-            for i in range(n_shards):
-                q = f"{exchange_name}_shard_{i}"
-                self.channel.queue_declare(queue=q, durable=True)
-                self.channel.queue_bind(
-                    queue=q, exchange=exchange_name, routing_key=str(i)
-                )
         except Exception:
             if hasattr(self, "connection") and self.connection.is_open:
                 self.connection.close()
@@ -44,9 +38,14 @@ class ShardedExchangeProducer:
                 exchange=self.exchange_name,
                 routing_key=str(shard_index),
                 body=message,
-                properties=pika.BasicProperties(delivery_mode=2),
+                properties=pika.BasicProperties(delivery_mode=1),
             )
-        except pika.exceptions.AMQPConnectionError:
+        except (
+            pika.exceptions.AMQPConnectionError,
+            pika.exceptions.AMQPChannelError,
+            pika.exceptions.ChannelWrongStateError,
+            pika.exceptions.StreamLostError,
+        ):
             raise MessageMiddlewareDisconnectedError
         except Exception:
             raise MessageMiddlewareMessageError
@@ -75,11 +74,15 @@ class ShardedExchangeConsumer:
     routing_key = str(shard_id).
     """
 
-    def __init__(self, host: str, exchange_name: str, shard_id: int):
+    def __init__(self, host: str, exchange_name: str, shard_id: int, consumer_group: str):
+        queue_name = f"{exchange_name}_{consumer_group}_shard_{shard_id}"
         self._inner = MessageMiddlewareExchangeRabbitMQ(
             host=host,
             exchange_name=exchange_name,
             routing_keys=[str(shard_id)],
+            queue_name=queue_name,
+            durable=False,
+            exclusive=False,
         )
 
     def start_consuming(self, on_message_callback):

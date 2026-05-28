@@ -182,7 +182,7 @@ class FilterWorker(WorkerBase):
         if self._is_date_range:
             if _target_matches_date_range(target, self._date_start, self._date_end):
                 self._maybe_drop_field(data)
-                logger.info(f"Row matches date range filter: {target} in [{self._date_start}, {self._date_end}]")
+                logger.debug(f"Row matches date range filter: {target} in [{self._date_start}, {self._date_end}]")
                 return [data]
             return []
 
@@ -190,7 +190,7 @@ class FilterWorker(WorkerBase):
         if self._value_set is not None:
             if _target_in_value_set(target, self._value_set):
                 self._maybe_drop_field(data)
-                logger.info(f"Row matches value set filter: {target} in {self._value_set}")
+                logger.debug(f"Row matches value set filter: {target} in {self._value_set}")
                 return [data]
             return []
 
@@ -214,7 +214,7 @@ class FilterWorker(WorkerBase):
         try:
             if self.op_func(target_cast, self.filter_value):
                 self._maybe_drop_field(data)
-                logger.info(f"Row matches filter: {target_cast} {FILTER_OP} {self.filter_value}")
+                logger.debug(f"Row matches filter: {target_cast} {FILTER_OP} {self.filter_value}")
                 return [data]
             return []
         except Exception:

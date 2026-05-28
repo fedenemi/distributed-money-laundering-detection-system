@@ -20,6 +20,7 @@ MAIN_INPUT_QUEUE_TAG = "MAIN_INPUT_QUEUE"
 MAIN_INPUT_EXCHANGE_TAG = "MAIN_INPUT_EXCHANGE"
 SEC_INPUT_QUEUE_TAG = "SECONDARY_INPUT_QUEUE"
 SEC_INPUT_EXCHANGE_TAG = "SECONDARY_INPUT_EXCHANGE"
+CONSUMER_GROUP_TAG = "CONSUMER_GROUP"
 SHARD_ID_TAG="SHARD_ID"
 MAIN_N_UPSTREAM_TAG="MAIN_N_UPSTREAM"
 SEC_N_UPSTREAM_TAG="SECONDARY_N_UPSTREAM"
@@ -59,12 +60,15 @@ def get_money_converters_services(service_prefix, total_instances, target_curren
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{MAIN_INPUT_QUEUE_TAG}={main_input_queue}")
         elif main_input_exchange is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{MAIN_INPUT_EXCHANGE_TAG}={main_input_exchange}")
+            new_service_config[DOCKER_ENV_VARS_NAME].append(f"{CONSUMER_GROUP_TAG}={service_prefix}")
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{SHARD_ID_TAG}={i}")
 
         if sec_input_queue is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{SEC_INPUT_QUEUE_TAG}={sec_input_queue}")
         elif sec_input_exchange is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{SEC_INPUT_EXCHANGE_TAG}={sec_input_exchange}")
+            if main_input_exchange is None:
+                new_service_config[DOCKER_ENV_VARS_NAME].append(f"{CONSUMER_GROUP_TAG}={service_prefix}")
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{SHARD_ID_TAG}={i}")
 
         if main_n_upstream is not None:

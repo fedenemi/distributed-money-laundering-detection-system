@@ -120,80 +120,87 @@ def recv_msg(socket):
 
 # Serialize helpers
 def _serialize_string(value):
-    return b"".join(
-        [
-            external_serializer.serialize_uint32(len(value)),
-            external_serializer.serialize_string(value),
-        ]
-    )
+    encoded = external_serializer.serialize_string(value)
+    return b"".join([
+        external_serializer.serialize_uint32(len(encoded)),
+        encoded,
+    ])
 
 
 def _serialize_row(row):
-    msg = external_serializer.serialize_uint32(len(row))
+    parts = [external_serializer.serialize_uint32(len(row))]
     for item in row:
-        msg += _serialize_string(item)
-    return msg
+        parts.append(_serialize_string(item))
+    return b"".join(parts)
 
 
 def _serialize_rows(rows):
-    msg = external_serializer.serialize_uint32(len(rows))
+    parts = [external_serializer.serialize_uint32(len(rows))]
     for row in rows:
-        msg += _serialize_row(row)
-    return msg
+        parts.append(_serialize_row(row))
+    return b"".join(parts)
 
 
 # Send handlers
 def _send_transactions_batch(socket, client_id, rows):
-    msg = external_serializer.serialize_uint32(MsgType.TRANSACTIONS_BATCH)
-    msg += _serialize_string(client_id)
-    msg += _serialize_rows(rows)
-    socket.sendall(msg)
+    socket.sendall(b"".join([
+        external_serializer.serialize_uint32(MsgType.TRANSACTIONS_BATCH),
+        _serialize_string(client_id),
+        _serialize_rows(rows),
+    ]))
 
 
 def _send_accounts_batch(socket, client_id, rows):
-    msg = external_serializer.serialize_uint32(MsgType.ACCOUNTS_BATCH)
-    msg += _serialize_string(client_id)
-    msg += _serialize_rows(rows)
-    socket.sendall(msg)
+    socket.sendall(b"".join([
+        external_serializer.serialize_uint32(MsgType.ACCOUNTS_BATCH),
+        _serialize_string(client_id),
+        _serialize_rows(rows),
+    ]))
 
 
 def _send_end_transactions(socket, client_id):
-    msg = external_serializer.serialize_uint32(MsgType.END_TRANSACTIONS)
-    msg += _serialize_string(client_id)
-    socket.sendall(msg)
+    socket.sendall(b"".join([
+        external_serializer.serialize_uint32(MsgType.END_TRANSACTIONS),
+        _serialize_string(client_id),
+    ]))
 
 
 def _send_end_accounts(socket, client_id):
-    msg = external_serializer.serialize_uint32(MsgType.END_ACCOUNTS)
-    msg += _serialize_string(client_id)
-    socket.sendall(msg)
+    socket.sendall(b"".join([
+        external_serializer.serialize_uint32(MsgType.END_ACCOUNTS),
+        _serialize_string(client_id),
+    ]))
 
 
 def _send_query_result_batch(socket, client_id, query_id, rows):
-    msg = external_serializer.serialize_uint32(MsgType.QUERY_RESULT_BATCH)
-    msg += _serialize_string(client_id)
-    msg += external_serializer.serialize_uint32(query_id)
-    msg += _serialize_rows(rows)
-    socket.sendall(msg)
+    socket.sendall(b"".join([
+        external_serializer.serialize_uint32(MsgType.QUERY_RESULT_BATCH),
+        _serialize_string(client_id),
+        external_serializer.serialize_uint32(query_id),
+        _serialize_rows(rows),
+    ]))
 
 
 def _send_end_query(socket, client_id, query_id):
-    msg = external_serializer.serialize_uint32(MsgType.END_QUERY)
-    msg += _serialize_string(client_id)
-    msg += external_serializer.serialize_uint32(query_id)
-    socket.sendall(msg)
+    socket.sendall(b"".join([
+        external_serializer.serialize_uint32(MsgType.END_QUERY),
+        _serialize_string(client_id),
+        external_serializer.serialize_uint32(query_id),
+    ]))
 
 
 def _send_end_results(socket, client_id):
-    msg = external_serializer.serialize_uint32(MsgType.END_RESULTS)
-    msg += _serialize_string(client_id)
-    socket.sendall(msg)
+    socket.sendall(b"".join([
+        external_serializer.serialize_uint32(MsgType.END_RESULTS),
+        _serialize_string(client_id),
+    ]))
 
 
 def _send_ack(socket, client_id):
-    msg = external_serializer.serialize_uint32(MsgType.ACK)
-    msg += _serialize_string(client_id)
-    socket.sendall(msg)
+    socket.sendall(b"".join([
+        external_serializer.serialize_uint32(MsgType.ACK),
+        _serialize_string(client_id),
+    ]))
 
 
 SEND_MSG_HANDLERS = {
