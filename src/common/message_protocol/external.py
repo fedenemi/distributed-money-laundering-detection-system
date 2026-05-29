@@ -78,13 +78,12 @@ def _recv_client_rows(socket):
     return (client_id, rows)
 
 
-# Gateway result batches keep the binary row format used by the client writer.
 def _recv_query_result_batch(socket):
     client_id = _recv_string(socket)
     query_id = external_serializer.deserialize_uint32(
         _recv_sized(socket, external_serializer.UINT32_SIZE)
     )
-    rows = _recv_rows(socket)
+    rows = _recv_csv_rows(socket)
     return (client_id, query_id, rows)
 
 
@@ -157,7 +156,12 @@ def _serialize_csv_rows(rows):
     csv_buffer = io.StringIO(newline="")
     writer = csv.writer(csv_buffer, lineterminator="\n")
     writer.writerows(rows)
-    payload = csv_buffer.getvalue().encode("utf-8")
+    return _serialize_csv_payload(csv_buffer.getvalue())
+
+
+def _serialize_csv_payload(payload):
+    if isinstance(payload, str):
+        payload = payload.encode("utf-8")
     return b"".join([
         external_serializer.serialize_uint32(len(payload)),
         payload,
@@ -200,7 +204,7 @@ def _send_query_result_batch(socket, client_id, query_id, rows):
         external_serializer.serialize_uint32(MsgType.QUERY_RESULT_BATCH),
         _serialize_string(client_id),
         external_serializer.serialize_uint32(query_id),
-        _serialize_rows(rows),
+        _serialize_csv_rows(rows),
     ]))
 
 
@@ -241,3 +245,13 @@ SEND_MSG_HANDLERS = {
 def send_msg(socket, msg_type, *args):
     msg_handler = SEND_MSG_HANDLERS[msg_type]
     msg_handler(socket, *args)
+
+
+def send_client_csv_batch(socket, msg_type, client_id, csv_payload):
+    if msg_type not in (MsgType.TRANSACTIONS_BATCH, MsgType.ACCOUNTS_BATCH):
+        raise ValueError("send_client_csv_batch only supports client input batches")
+    socket.sendall(b"".join([
+        external_serializer.serialize_uint32(msg_type),
+        _serialize_string(client_id),
+        _serialize_csv_payload(csv_payload),
+    ]))

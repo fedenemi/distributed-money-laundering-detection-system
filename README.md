@@ -13,18 +13,20 @@ Tipos de mensaje:
 - `ACCOUNTS_BATCH` (`2`): `client_id` + payload CSV de cuentas.
 - `END_TRANSACTIONS` (`3`): `client_id`.
 - `END_ACCOUNTS` (`4`): `client_id`.
-- `QUERY_RESULT_BATCH` (`5`): `client_id` + `query_id` + filas de resultado.
+- `QUERY_RESULT_BATCH` (`5`): `client_id` + `query_id` + payload CSV de resultados.
 - `END_QUERY` (`6`): `client_id` + `query_id`.
 - `END_RESULTS` (`7`): `client_id`.
 - `ACK` (`8`): `client_id`.
 
-### Batches de entrada
+### Batches CSV
 
-`TRANSACTIONS_BATCH` y `ACCOUNTS_BATCH` usan un unico payload CSV por batch:
+`TRANSACTIONS_BATCH`, `ACCOUNTS_BATCH` y `QUERY_RESULT_BATCH` usan un unico
+payload CSV por batch:
 
 ```
 uint32 msg_type
 string client_id
+uint32 query_id      # solo para QUERY_RESULT_BATCH
 uint32 payload_size
 bytes csv_payload
 ```
@@ -37,24 +39,7 @@ Timestamp, From Bank, Account, To Bank, Account.1,
 Amount Paid, Payment Currency, Payment Format
 ```
 
-Este formato evita serializar cada celda por separado y reduce el costo de CPU
-del cliente y del gateway al procesar datasets grandes.
-
-### Batches de resultados
-
-`QUERY_RESULT_BATCH` conserva el formato binario por filas:
-
-```
-uint32 msg_type
-string client_id
-uint32 query_id
-uint32 row_count
-  uint32 column_count
-    string value
-```
-
-Se mantiene asi porque los resultados son mas chicos que el input y el cliente
-los escribe directamente en CSV.
+Este formato evita serializar cada celda por separado y reduce el costo de CPU del cliente y del gateway al procesar datasets grandes.
 
 
 Flujo esperado:

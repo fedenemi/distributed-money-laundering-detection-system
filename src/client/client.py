@@ -1,4 +1,5 @@
 import csv
+import io
 import logging
 import os
 import signal
@@ -118,31 +119,38 @@ class Client:
             logging.error(traceback.format_exc())
             raise
 
-    def _send_rows_in_batches(self, rows, msg_type, progress_label=None):
-        batch = []
+    def _send_csv_batch(self, msg_type, csv_buffer, row_count):
+        logging.debug(f"Sending batch of {row_count} rows to gateway")
+        message_protocol.external.send_client_csv_batch(
+            self.server_socket,
+            msg_type,
+            self.client_id,
+            csv_buffer.getvalue(),
+        )
+        self._expect_ack()
+
+    def _send_csv_rows_in_batches(self, rows, msg_type, progress_label=None):
+        csv_buffer = io.StringIO(newline="")
+        csv_writer = csv.writer(csv_buffer, lineterminator="\n")
+        batch_count = 0
         total_sent = 0
         next_progress_log = PROGRESS_LOG_EVERY
         for row in rows:
-            batch.append(row)
-            if len(batch) >= self.batch_size:
-                logging.debug(f"Sending batch of {len(batch)} rows to gateway")
-                message_protocol.external.send_msg(
-                    self.server_socket, msg_type, self.client_id, batch
-                )
-                self._expect_ack()
-                total_sent += len(batch)
+            csv_writer.writerow(row)
+            batch_count += 1
+            if batch_count >= self.batch_size:
+                self._send_csv_batch(msg_type, csv_buffer, batch_count)
+                total_sent += batch_count
                 if progress_label and total_sent >= next_progress_log:
                     logging.info(f"Sent {total_sent} {progress_label} rows to gateway")
                     next_progress_log += PROGRESS_LOG_EVERY
-                batch = []
+                csv_buffer = io.StringIO(newline="")
+                csv_writer = csv.writer(csv_buffer, lineterminator="\n")
+                batch_count = 0
 
-        if batch:
-            logging.debug(f"Sending final batch of {len(batch)} rows to gateway")
-            message_protocol.external.send_msg(
-                self.server_socket, msg_type, self.client_id, batch
-            )
-            self._expect_ack()
-            total_sent += len(batch)
+        if batch_count:
+            self._send_csv_batch(msg_type, csv_buffer, batch_count)
+            total_sent += batch_count
 
         if progress_label:
             logging.info(f"Finished sending {total_sent} {progress_label} rows to gateway")
@@ -166,11 +174,11 @@ class Client:
 
     def send_accounts_and_transactions(self):
         logging.info("Sending accounts in batches")
-        with open(self.accounts_file, newline="\n") as csvfile:
+        with open(self.accounts_file, newline="") as csvfile:
             csv_reader = csv.reader(csvfile, delimiter=",", quotechar='"')
             next(csv_reader, None)
             rows = ([row[0], row[1]] for row in csv_reader if len(row) >= 2)
-            self._send_rows_in_batches(
+            self._send_csv_rows_in_batches(
                 rows,
                 message_protocol.external.MsgType.ACCOUNTS_BATCH,
                 "account",
@@ -185,9 +193,9 @@ class Client:
         self._expect_ack()
 
         logging.info("Sending transactions in batches")
-        with open(self.transactions_file, newline="\n") as csvfile:
+        with open(self.transactions_file, newline="") as csvfile:
             csv_reader = csv.reader(csvfile, delimiter=",", quotechar='"')
-            self._send_rows_in_batches(
+            self._send_csv_rows_in_batches(
                 self._transaction_rows(csv_reader),
                 message_protocol.external.MsgType.TRANSACTIONS_BATCH,
                 "transaction",
