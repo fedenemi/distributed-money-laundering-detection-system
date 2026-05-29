@@ -12,9 +12,9 @@ services:
     - PYTHONUNBUFFERED=1
     - SERVER_HOST=gateway
     - SERVER_PORT=7659
-    - BATCH_SIZE=50000
-    - TRANSACTIONS_FILE=/datasets/transactions_1M.csv
-    - ACCOUNTS_FILE=/datasets/accounts_1M.csv
+    - BATCH_SIZE=5000
+    - TRANSACTIONS_FILE=/datasets/LI-Small_Trans.csv
+    - ACCOUNTS_FILE=/datasets/LI-Small_accounts.csv
     - CLIENT_ID=0
     - RESULTS_DIR=/results
     volumes:

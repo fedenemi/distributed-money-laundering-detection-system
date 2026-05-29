@@ -10,7 +10,7 @@ environment:
 - PYTHONUNBUFFERED=1
 - SERVER_HOST=gateway
 - SERVER_PORT=7659
-- BATCH_SIZE=50000
+- BATCH_SIZE=5000
 volumes:
 - ./datasets:/datasets
 - ./results:/results

@@ -1,20 +1,60 @@
 # money-laundering-analysis-tp
 Sistema distribuido multicliente, escalable y tolerante a fallas que analiza la información de transacciones bancarias para detectar lavado de activos.
 
-## Protocolo de comunicacion (cliente-servidor)
+## Protocolo de comunicacion (cliente-gateway)
 
-Todos los enteros se serializan como uint32 en big-endian. Los strings se serializan como largo (uint32) + bytes utf-8.
+El cliente y el gateway se comunican por TCP. Todos los mensajes empiezan con
+un `msg_type` serializado como `uint32` big-endian. Los strings se serializan
+como `uint32 length` + bytes UTF-8.
 
 Tipos de mensaje:
 
-- `TRANSACTIONS_BATCH`: `client_id` (string), lista de filas (cada fila es lista de strings)
-- `ACCOUNTS_BATCH`: `client_id` (string), lista de filas (cada fila es lista de strings)
-- `END_TRANSACTIONS`: `client_id` (string)
-- `END_ACCOUNTS`: `client_id` (string)
-- `QUERY_RESULT_BATCH`: `client_id` (string), `query_id` (uint32), lista de filas
-- `END_QUERY`: `client_id` (string), `query_id` (uint32)
-- `END_RESULTS`: `client_id` (string)
-- `ACK`: `client_id` (string)
+- `TRANSACTIONS_BATCH` (`1`): `client_id` + payload CSV de transacciones.
+- `ACCOUNTS_BATCH` (`2`): `client_id` + payload CSV de cuentas.
+- `END_TRANSACTIONS` (`3`): `client_id`.
+- `END_ACCOUNTS` (`4`): `client_id`.
+- `QUERY_RESULT_BATCH` (`5`): `client_id` + `query_id` + filas de resultado.
+- `END_QUERY` (`6`): `client_id` + `query_id`.
+- `END_RESULTS` (`7`): `client_id`.
+- `ACK` (`8`): `client_id`.
+
+### Batches de entrada
+
+`TRANSACTIONS_BATCH` y `ACCOUNTS_BATCH` usan un unico payload CSV por batch:
+
+```
+uint32 msg_type
+string client_id
+uint32 payload_size
+bytes csv_payload
+```
+
+El payload CSV no incluye header. Para transacciones, el cliente proyecta y
+envia solo las columnas que usa el sistema:
+
+```
+Timestamp, From Bank, Account, To Bank, Account.1,
+Amount Paid, Payment Currency, Payment Format
+```
+
+Este formato evita serializar cada celda por separado y reduce el costo de CPU
+del cliente y del gateway al procesar datasets grandes.
+
+### Batches de resultados
+
+`QUERY_RESULT_BATCH` conserva el formato binario por filas:
+
+```
+uint32 msg_type
+string client_id
+uint32 query_id
+uint32 row_count
+  uint32 column_count
+    string value
+```
+
+Se mantiene asi porque los resultados son mas chicos que el input y el cliente
+los escribe directamente en CSV.
 
 
 Flujo esperado:
