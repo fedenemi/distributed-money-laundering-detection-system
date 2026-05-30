@@ -11,3 +11,4 @@ entrypoint:
 environment:
 - MOM_HOST=rabbitmq
 - PYTHONUNBUFFERED=1
+- BATCH_SIZE=1

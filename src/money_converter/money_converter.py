@@ -72,13 +72,14 @@ class MoneyConverter(WorkerBaseDoubleIO):
         origin_curr = data["Payment Currency"]
         origin_code = CURRENCY_CODES.get(origin_curr, origin_curr)
         target_code = CURRENCY_CODES.get(self._target_currency, self._target_currency)
-        rate_key = (origin_code, target_code)
-        currency_rate_req = []
+        
+        rate_key = f"{day}_{origin_code}_{target_code}"
 
+        # --- FAST PATHS ---
+        # Si devuelve en el 2do elemento de la tupla, tu base class hace _emit_sec_output directo
         if origin_code == target_code:
             data_copy["Payment Currency"] = self._target_currency
-            self._emit_sec_output([data_copy])
-            return ([], [])
+            return ([], [data_copy])
 
         if origin_code == "BTC" and target_code == "USD":
             rate = self._btc_rates_by_day.get(day)
@@ -88,25 +89,33 @@ class MoneyConverter(WorkerBaseDoubleIO):
             data_copy["Payment Currency"] = self._target_currency
             data_copy["Amount Paid"] = float(data["Amount Paid"]) * rate
             self._log_conversion(day, origin_code, target_code, data["Amount Paid"], rate, data_copy["Amount Paid"])
-            self._emit_sec_output([data_copy])
-            return ([], [])
+            return ([], [data_copy])
 
-        if day not in self._currency_rates_by_date or \
-                rate_key not in self._currency_rates_by_date[day]:
-            currency_rate_req.append(
-                self._generate_consult_currency_rate(day, origin_code, target_code)
-            )
-            return (currency_rate_req, [data_copy])
+        # --- CACHE Y PENDIENTES ---
+        with self._shared_lock:
+            if rate_key in self._shared_cache:
+                rate = self._shared_cache[rate_key]
+                data_copy["Payment Currency"] = self._target_currency
+                data_copy["Amount Paid"] = float(data["Amount Paid"]) * rate
+                self._log_conversion(day, origin_code, target_code, data["Amount Paid"], rate, data_copy["Amount Paid"])
+                return ([], [data_copy])
+            
+            else:
+                pending_list = self._shared_pending.get(rate_key, [])
+                is_first_request = (len(pending_list) == 0)
+                pending_list.append(data_copy)
+                self._shared_pending[rate_key] = pending_list
 
-        rate = self._currency_rates_by_date[day][rate_key]
-        data_copy["Payment Currency"] = self._target_currency
-        data_copy["Amount Paid"] = float(data["Amount Paid"]) * rate
-        self._log_conversion(day, origin_code, target_code, data["Amount Paid"], rate, data_copy["Amount Paid"])
-        self._emit_sec_output([data_copy])
+        if is_first_request:
+            req = self._generate_consult_currency_rate(day, origin_code, target_code)
+            # Devuelve en el 1er elemento para que se envíe como request a RabbitMQ
+            return ([req], [])
+
+        # Se anotó en pendientes pero la request ya fue enviada por otra fila
         return ([], [])
 
 
-    def process_secondary_input(self, data: dict, prev_stage_data: list) -> tuple[list, list]:
+    def process_secondary_input(self, data: dict) -> tuple[list, list]:
         new_data_list = []
 
         if "Type" not in data:
@@ -114,23 +123,19 @@ class MoneyConverter(WorkerBaseDoubleIO):
             origin_code = data["origin"]
             target_code = data["destination"]
             currency_rate = data["conversion_rate"]
+            rate_key = f"{day}_{origin_code}_{target_code}"
 
-            self._currency_rates_by_date.setdefault(day, {})
-            self._currency_rates_by_date[day][(origin_code, target_code)] = currency_rate
+            with self._shared_lock:
+                self._shared_cache[rate_key] = currency_rate
+                pending_txs = self._shared_pending.pop(rate_key, [])
 
-            for row in prev_stage_data:
-                row_copy = row.copy()
-                row_day = str(row_copy["Timestamp"]).split(" ")[0].replace("/", "-")
-                row_origin = CURRENCY_CODES.get(row_copy["Payment Currency"], row_copy["Payment Currency"])
-
-                if row_day == day and row_origin == origin_code:
-                    amount_in = row_copy["Amount Paid"]
-                    amount_out = currency_rate * float(row_copy["Amount Paid"])
-                    row_copy["Amount Paid"] = str(amount_out)
-                    row_copy["Payment Currency"] = self._target_currency
-                    self._log_conversion(day, origin_code, target_code, amount_in, currency_rate, amount_out)
-
-                new_data_list.append(row_copy)
+            for row in pending_txs:
+                amount_in = row["Amount Paid"]
+                amount_out = currency_rate * float(amount_in)
+                row["Amount Paid"] = str(amount_out)
+                row["Payment Currency"] = self._target_currency
+                self._log_conversion(day, origin_code, target_code, amount_in, currency_rate, amount_out)
+                new_data_list.append(row)
 
         return ([], new_data_list)
 

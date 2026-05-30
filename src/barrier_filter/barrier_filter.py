@@ -86,7 +86,7 @@ class BarrierFilter(WorkerBaseDoubleIO):
             self._store_transaction(client_id, data)
             return ([], [])
 
-    def process_secondary_input(self, data, prev_stage_data):
+    def process_secondary_input(self, data):
         logging.debug("Nuevo promedio recibido")
 
         client_id = data["client_id"]

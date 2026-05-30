@@ -1268,6 +1268,7 @@ services:
     - SECONDARY_OUTPUT_EXCHANGE=q5_converted_amounts_exc
     - TARGET_CURRENCY=US Dollar
     - BATCH_SIZE=1
+    - SEC_BATCH_SIZE=5000
     - SECONDARY_OUTPUT_SHARDS=3
   q5_money_converter_api_client_0:
     build:
@@ -1283,6 +1284,7 @@ services:
     environment:
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
+    - BATCH_SIZE=1
     - N_UPSTREAM=1
     - INPUT_QUEUE=q5_reqs_currency_rates_api
     - OUTPUT_QUEUE=q5_currency_rates_from_api

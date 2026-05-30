@@ -62,6 +62,7 @@ class WorkerBaseDoubleIO:
 
     def __init__(self):
         self.batch_size      = int(os.environ.get("BATCH_SIZE", "500"))
+        self.sec_batch_size  = int(os.environ.get("SEC_BATCH_SIZE", str(self.batch_size)))
         self.total_clients   = int(os.environ.get("TOTAL_CLIENTS", "0"))
         self.consumer_group  = os.environ.get("CONSUMER_GROUP", self.__class__.__name__)
 
@@ -171,7 +172,7 @@ class WorkerBaseDoubleIO:
     def process_main_input(self, data: dict) -> tuple[list, list]:
         raise NotImplementedError
 
-    def process_secondary_input(self, data: dict, prev_stage_data: list) -> tuple[list, list]:
+    def process_secondary_input(self, data: dict) -> tuple[list, list]:
         raise NotImplementedError
 
     def on_main_input_eof(self, client_id=None) -> list:
@@ -206,22 +207,9 @@ class WorkerBaseDoubleIO:
 
     # --- Emisión con Buffer y flush --------------------------------------------------------
 
-    def _send_data_batch_to_next_stage(self):
-        if not self._results_buffer_next_stage:
-            return
-        new_data_batch = self._results_buffer_next_stage
-        self._results_buffer_next_stage = []
-        self._channel_stages.put(new_data_batch)
-
-    def _send_data_to_next_stage(self, results: list):
-        for res in results:
-            self._results_buffer_next_stage.append(res)
-            if len(self._results_buffer_next_stage) >= self.batch_size:
-                self._send_data_batch_to_next_stage()
-
     def _emit_results_main_stage(self, results: tuple[list, list]):
         self._emit_main_output(results[0])
-        self._send_data_to_next_stage(results[1])
+        self._emit_sec_output(results[1])
 
     def _emit_main_output(self, results: list):
         if not results or self._main_producer is None:
@@ -238,7 +226,7 @@ class WorkerBaseDoubleIO:
         for msg in results:
             buf_key = self._buffer_key(msg, self.sec_output_exchange, self.sec_output_shards)
             self._sec_out_buffer.setdefault(buf_key, []).append(msg)
-            if len(self._sec_out_buffer[buf_key]) >= self.batch_size:
+            if len(self._sec_out_buffer[buf_key]) >= self.sec_batch_size:
                 self._flush_sec_buffer_key(buf_key)
 
     def _flush_main_buffer_key(self, buf_key: str):
@@ -287,7 +275,6 @@ class WorkerBaseDoubleIO:
 
     def _flush_all_next_stage(self):
         self._flush_all_main_buffer()
-        self._send_data_batch_to_next_stage()
 
     def _send_main_output_eof(self, client_id=None):
         if self._main_producer is None:
@@ -479,10 +466,9 @@ class WorkerBaseDoubleIO:
                 else:
                     for row in msg.get("rows", []):
                         if self._operation_mode == "PIPELINE":
-                            prev_stage_data = self._channel_stages.get()
-                            self._emit_sec_output(self.process_secondary_input(row, prev_stage_data)[1])
+                            self._emit_sec_output(self.process_secondary_input(row)[1])
                         else:
-                            self.process_secondary_input(row, None)
+                            self.process_secondary_input(row)
                     ack()
             except Exception as e:
                 logger.error(f"Error procesando mensaje: {e}")
@@ -524,7 +510,17 @@ class WorkerBaseDoubleIO:
             return MessageMiddlewareQueueRabbitMQ(RABBITMQ_HOST, self.sec_input_queue)
         raise ValueError("Se requiere SECONDARY_INPUT_QUEUE o SECONDARY_INPUT_EXCHANGE + SHARD_ID")
 
-    def run_main_process(self, clients_eof_main, clients_eof_sec, clients_joined, clients_secondary_ready, eof_lock, channel_stages):
+    def run_main_process(self,
+                         clients_eof_main,
+                         clients_eof_sec,
+                         clients_joined,
+                         clients_secondary_ready,
+                         eof_lock,
+                         channel_stages,
+                         shared_cache,
+                         shared_pending,
+                         shared_lock,
+                         ):
         logging.basicConfig(level=logging.INFO)
         # Shared variables
         self._clients_eof_main_input = clients_eof_main
@@ -533,6 +529,9 @@ class WorkerBaseDoubleIO:
         self._clients_secondary_ready = clients_secondary_ready
         self._eof_lock = eof_lock
         self._channel_stages = channel_stages
+        self._shared_cache = shared_cache
+        self._shared_pending = shared_pending
+        self._shared_lock = shared_lock
 
         # Input
         self.main_input_queue     = os.environ.get("MAIN_INPUT_QUEUE", "")
@@ -576,7 +575,16 @@ class WorkerBaseDoubleIO:
         # Handle inputs
         self.handle_message_main_input()
 
-    def run_sec_process(self, clients_eof_main, clients_eof_sec, clients_joined, clients_secondary_ready, eof_lock, channel_stages):
+    def run_sec_process(self,
+                        clients_eof_main,
+                        clients_eof_sec,
+                        clients_joined,
+                        clients_secondary_ready,
+                        eof_lock, channel_stages,
+                        shared_cache,
+                        shared_pending,
+                        shared_lock,
+                        ):
         logging.basicConfig(level=logging.INFO)
         # Shared variables
         self._clients_eof_main_input = clients_eof_main
@@ -585,6 +593,9 @@ class WorkerBaseDoubleIO:
         self._clients_secondary_ready = clients_secondary_ready
         self._eof_lock = eof_lock
         self._channel_stages = channel_stages
+        self._shared_cache = shared_cache
+        self._shared_pending = shared_pending
+        self._shared_lock = shared_lock
 
         # Input
         self.sec_input_queue     = os.environ.get("SECONDARY_INPUT_QUEUE", "")
@@ -641,15 +652,36 @@ class WorkerBaseDoubleIO:
         clients_secondary_ready = manager.dict()
         eof_lock = multiprocessing.Lock()
         channel_stages = multiprocessing.Queue()
+        shared_cache = manager.dict()
+        shared_pending = manager.dict()
+        shared_lock = manager.Lock()
 
         # Create processes
         main_process = multiprocessing.Process(
             target=self.run_main_process, 
-            args=(clients_eof_main, clients_eof_sec, clients_joined, clients_secondary_ready, eof_lock, channel_stages)
+            args=(clients_eof_main, 
+                  clients_eof_sec, 
+                  clients_joined, 
+                  clients_secondary_ready, 
+                  eof_lock, 
+                  channel_stages,
+                  shared_cache,
+                  shared_pending,
+                  shared_lock,
+                  )
         )
         sec_process = multiprocessing.Process(
             target=self.run_sec_process,
-            args=(clients_eof_main, clients_eof_sec, clients_joined, clients_secondary_ready, eof_lock, channel_stages)
+            args=(clients_eof_main, 
+                  clients_eof_sec, 
+                  clients_joined, 
+                  clients_secondary_ready, 
+                  eof_lock, 
+                  channel_stages,
+                  shared_cache,
+                  shared_pending,
+                  shared_lock,
+                  )
         )
 
         def _handle_sigterm(*_):

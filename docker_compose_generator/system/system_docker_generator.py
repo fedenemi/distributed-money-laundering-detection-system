@@ -356,6 +356,7 @@ def generate_system_docker_compose(total_clients=0):
         )
         for name, config in q5_money_converters.items():
             config["environment"].append("BATCH_SIZE=1")
+            config["environment"].append("SEC_BATCH_SIZE=5000")
             config["environment"].append(f"SECONDARY_OUTPUT_SHARDS={q5_filter_lt_1_usd_instances}")
         system = system | q5_money_converters
 
