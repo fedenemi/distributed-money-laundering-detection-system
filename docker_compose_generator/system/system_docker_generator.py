@@ -367,6 +367,7 @@ def generate_system_docker_compose(total_clients=0):
             input_queue="q5_reqs_currency_rates_api",
             output_exchange="q5_currency_rates_from_api_exc",
             output_shards=q5_money_converters_instances,
+            n_upstream=q5_money_converters_instances,
         )
         system = system | q5_money_converters_api_client
 
