@@ -37,6 +37,7 @@ def get_money_converters_services(service_prefix, total_instances, target_curren
                         sec_input_queue=None, sec_input_exchange=None, sec_n_upstream=None,
                         main_output_queue=None, main_output_exchange=None,
                         sec_output_queue=None, sec_output_exchange=None,
+                        main_output_shards=1, sec_output_shards=1,
                         ):
     with open(CONFIG_FILE, "r") as config_file:
         base_money_converter_service = yaml.safe_load(config_file)
@@ -80,11 +81,15 @@ def get_money_converters_services(service_prefix, total_instances, target_curren
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{MAIN_OUTPUT_QUEUE_TAG}={main_output_queue}")
         elif main_output_exchange is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{MAIN_OUTPUT_EXCHANGE_TAG}={main_output_exchange}")
+            if main_output_shards >= 1:
+                new_service_config[DOCKER_ENV_VARS_NAME].append(f"MAIN_OUTPUT_SHARDS={main_output_shards}")
 
         if sec_output_queue is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{SEC_OUTPUT_QUEUE_TAG}={sec_output_queue}")
         elif sec_output_exchange is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{SEC_OUTPUT_EXCHANGE_TAG}={sec_output_exchange}")
+            if sec_output_shards >= 1:
+                new_service_config[DOCKER_ENV_VARS_NAME].append(f"SEC_OUTPUT_SHARDS={sec_output_shards}")
 
         ## Target currency
         new_service_config[DOCKER_ENV_VARS_NAME].append(f"{TARGET_CURRENCY_TAG}={target_currency}")

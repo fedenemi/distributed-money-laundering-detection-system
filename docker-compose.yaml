@@ -1152,7 +1152,8 @@ services:
     - INPUT_EXCHANGE=q5_reduced_exc
     - CONSUMER_GROUP=q5_filter_01092022_05092022
     - SHARD_ID=0
-    - OUTPUT_QUEUE=q5_converter_to_usd
+    - OUTPUT_EXCHANGE=q5_converter_to_usd_exc
+    - OUTPUT_SHARDS=3
     - FILTER_FIELD=Timestamp
     - FILTER_OP=in
     - FILTER_VALUE=["2022/09/01", "2022/09/05"]
@@ -1170,7 +1171,8 @@ services:
     - INPUT_EXCHANGE=q5_reduced_exc
     - CONSUMER_GROUP=q5_filter_01092022_05092022
     - SHARD_ID=1
-    - OUTPUT_QUEUE=q5_converter_to_usd
+    - OUTPUT_EXCHANGE=q5_converter_to_usd_exc
+    - OUTPUT_SHARDS=3
     - FILTER_FIELD=Timestamp
     - FILTER_OP=in
     - FILTER_VALUE=["2022/09/01", "2022/09/05"]
@@ -1188,7 +1190,8 @@ services:
     - INPUT_EXCHANGE=q5_reduced_exc
     - CONSUMER_GROUP=q5_filter_01092022_05092022
     - SHARD_ID=2
-    - OUTPUT_QUEUE=q5_converter_to_usd
+    - OUTPUT_EXCHANGE=q5_converter_to_usd_exc
+    - OUTPUT_SHARDS=3
     - FILTER_FIELD=Timestamp
     - FILTER_OP=in
     - FILTER_VALUE=["2022/09/01", "2022/09/05"]
@@ -1261,13 +1264,16 @@ services:
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
     - OP_MODE=PIPELINE
-    - MAIN_INPUT_QUEUE=q5_converter_to_usd
-    - SECONDARY_INPUT_EXCHANGE=q5_currency_rates_from_api_exc
+    - MAIN_INPUT_EXCHANGE=q5_converter_to_usd_exc
     - CONSUMER_GROUP=q5_money_converter
     - SHARD_ID=0
+    - SECONDARY_INPUT_EXCHANGE=q5_currency_rates_from_api_exc
+    - SHARD_ID=0
     - MAIN_N_UPSTREAM=3
+    - SECONDARY_N_UPSTREAM=1
     - MAIN_OUTPUT_QUEUE=q5_reqs_currency_rates_api
     - SECONDARY_OUTPUT_EXCHANGE=q5_converted_amounts_exc
+    - SEC_OUTPUT_SHARDS=1
     - TARGET_CURRENCY=US Dollar
     - BATCH_SIZE=1
     - SEC_BATCH_SIZE=5000
@@ -1284,13 +1290,16 @@ services:
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
     - OP_MODE=PIPELINE
-    - MAIN_INPUT_QUEUE=q5_converter_to_usd
-    - SECONDARY_INPUT_EXCHANGE=q5_currency_rates_from_api_exc
+    - MAIN_INPUT_EXCHANGE=q5_converter_to_usd_exc
     - CONSUMER_GROUP=q5_money_converter
     - SHARD_ID=1
+    - SECONDARY_INPUT_EXCHANGE=q5_currency_rates_from_api_exc
+    - SHARD_ID=1
     - MAIN_N_UPSTREAM=3
+    - SECONDARY_N_UPSTREAM=1
     - MAIN_OUTPUT_QUEUE=q5_reqs_currency_rates_api
     - SECONDARY_OUTPUT_EXCHANGE=q5_converted_amounts_exc
+    - SEC_OUTPUT_SHARDS=1
     - TARGET_CURRENCY=US Dollar
     - BATCH_SIZE=1
     - SEC_BATCH_SIZE=5000
@@ -1307,13 +1316,16 @@ services:
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
     - OP_MODE=PIPELINE
-    - MAIN_INPUT_QUEUE=q5_converter_to_usd
-    - SECONDARY_INPUT_EXCHANGE=q5_currency_rates_from_api_exc
+    - MAIN_INPUT_EXCHANGE=q5_converter_to_usd_exc
     - CONSUMER_GROUP=q5_money_converter
     - SHARD_ID=2
+    - SECONDARY_INPUT_EXCHANGE=q5_currency_rates_from_api_exc
+    - SHARD_ID=2
     - MAIN_N_UPSTREAM=3
+    - SECONDARY_N_UPSTREAM=1
     - MAIN_OUTPUT_QUEUE=q5_reqs_currency_rates_api
     - SECONDARY_OUTPUT_EXCHANGE=q5_converted_amounts_exc
+    - SEC_OUTPUT_SHARDS=1
     - TARGET_CURRENCY=US Dollar
     - BATCH_SIZE=1
     - SEC_BATCH_SIZE=5000
@@ -1336,7 +1348,7 @@ services:
     - N_UPSTREAM=1
     - INPUT_QUEUE=q5_reqs_currency_rates_api
     - OUTPUT_EXCHANGE=q5_currency_rates_from_api_exc
-    - OUTPUT_SHARDS=1
+    - OUTPUT_SHARDS=3
   q5_payment_fmt_filter_0:
     build:
       context: ./src

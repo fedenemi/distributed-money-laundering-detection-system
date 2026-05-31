@@ -20,7 +20,8 @@ Variables de entorno:
   MAIN_OUTPUT_QUEUE    : cola de salida simple secundaria
   MAIN_OUTPUT_EXCHANGE : exchange de salida con sharding principal
   SECONDARY_OUTPUT_EXCHANGE : exchange de salida con sharding secundaria
-  OUTPUT_SHARDS   : cantidad de shards de salida (default 1)
+  MAIN_OUTPUT_SHARDS    : cantidad de shards de salida principal (default 1)
+  SEC_OUTPUT_SHARDS     : cantidad de shards de salida secundaria (default 1)
   BATCH_SIZE      : filas por batch de salida (default 500)
   OP_MODE           : Modo de operación del worker. JOINER si se quiere que se use como joiner de
                         de dos entradas o PIPELINE si se quieren realizar acciones primero con la

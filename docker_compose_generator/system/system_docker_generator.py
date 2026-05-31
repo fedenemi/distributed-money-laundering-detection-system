@@ -340,19 +340,21 @@ def generate_system_docker_compose(total_clients=0):
             q5_filter_01092022_05092022_prefix, q5_filter_01092022_05092022_instances,
             filter_field="Timestamp", filter_op="in", filter_value='["2022/09/01", "2022/09/05"]',
             input_exchange="q5_reduced_exc",
-            output_queue="q5_converter_to_usd",
+            output_exchange="q5_converter_to_usd_exc",
             n_upstream=q5_data_reducer_instances,
+            output_shards=q5_money_converters_instances,
         )
         system = system | q5_filters_01092022_05092022
 
         # Conversion to USD
         q5_money_converters = get_money_converters_services(
             q5_money_converters_prefix, q5_money_converters_instances, "US Dollar",
-            main_input_queue="q5_converter_to_usd",
+            main_input_exchange="q5_converter_to_usd_exc",
             sec_input_exchange="q5_currency_rates_from_api_exc",
             main_output_queue="q5_reqs_currency_rates_api",
             sec_output_exchange="q5_converted_amounts_exc",
             main_n_upstream=q5_filter_01092022_05092022_instances,
+            sec_n_upstream=q5_money_converter_api_client_instances,
         )
         for name, config in q5_money_converters.items():
             config["environment"].append("BATCH_SIZE=1")
@@ -363,7 +365,8 @@ def generate_system_docker_compose(total_clients=0):
         q5_money_converters_api_client = get_money_conversion_api_client_docker_services(
             q5_money_converter_api_client_prefix, q5_money_converter_api_client_instances,
             input_queue="q5_reqs_currency_rates_api",
-            output_exchange="q5_currency_rates_from_api_exc"
+            output_exchange="q5_currency_rates_from_api_exc",
+            output_shards=q5_money_converters_instances,
         )
         system = system | q5_money_converters_api_client
 
