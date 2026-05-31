@@ -172,9 +172,15 @@ class WorkerBaseDoubleIO:
 
     def process_main_input(self, data: dict) -> tuple[list, list]:
         raise NotImplementedError
+    
+    def on_main_batch_complete(self):
+        return
 
     def process_secondary_input(self, data: dict) -> tuple[list, list]:
         raise NotImplementedError
+    
+    def on_sec_batch_complete(self):
+        return
 
     def on_main_input_eof(self, client_id=None) -> list:
         return []
@@ -411,6 +417,7 @@ class WorkerBaseDoubleIO:
                         else:
                             results, _ = self.process_main_input(row)
                             self._emit_main_output(results)
+                        self.on_main_batch_complete()
                     ack()
             except Exception as e:
                 logger.error(f"Error procesando mensaje: {e}")
@@ -471,6 +478,7 @@ class WorkerBaseDoubleIO:
                             self._emit_sec_output(self.process_secondary_input(row)[1])
                         else:
                             self.process_secondary_input(row)
+                        self.on_sec_batch_complete()
                     ack()
             except Exception as e:
                 logger.error(f"Error procesando mensaje: {e}")

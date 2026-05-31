@@ -18,10 +18,16 @@ class BarrierFilter(WorkerBaseDoubleIO):
         )
         os.makedirs(self._spool_dir, exist_ok=True)
 
+        # Processes manager
         manager = multiprocessing.Manager()
         self._comparison_values_by_client = manager.dict()
         self._thresholds_ready_by_client = manager.dict()
         self._spool_lock = manager.RLock()
+
+        # Local elements
+        self._local_thresholds_ready = set()
+        self._local_comparison_values = {}
+        self._spool_buffer = {}
 
     def _spool_path(self, client_id):
         shard_id = os.environ.get("SHARD_ID", "unknown")
@@ -77,14 +83,41 @@ class BarrierFilter(WorkerBaseDoubleIO):
         logging.debug("Nueva transaccion recibida")
         client_id = data["client_id"]
 
-        with self._spool_lock:
-            comparison_values = self._comparison_values_by_client.get(client_id, {})
-            if self._thresholds_ready_by_client.get(client_id, False):
-                result = self._filter_transaction(client_id, data, comparison_values)
-                return ([result], []) if result is not None else ([], [])
+        if client_id not in self._local_thresholds_ready:
+            if client_id in self._thresholds_ready_by_client:
+                self._local_thresholds_ready.add(client_id)
+                self._local_comparison_values[client_id] = self._comparison_values_by_client.get(client_id, {})
 
-            self._store_transaction(client_id, data)
-            return ([], [])
+        if client_id in self._local_thresholds_ready:
+            result = self._filter_transaction(client_id, data, self._local_comparison_values[client_id])
+            return ([result], []) if result is not None else ([], [])
+
+        self._spool_buffer.setdefault(client_id, []).append(json.dumps(data, separators=(",", ":")))
+        return ([], [])
+
+    def on_main_batch_complete(self):
+        if not self._spool_buffer:
+            return
+
+        with self._spool_lock:
+            for client_id, rows in list(self._spool_buffer.items()):
+                if not rows:
+                    continue
+                if self._thresholds_ready_by_client.get(client_id, False):
+                    self._local_comparison_values[client_id] = self._comparison_values_by_client.get(client_id, {})
+                    results_to_emit = []
+                    for row_str in rows:
+                        data = json.loads(row_str)
+                        result = self._filter_transaction(client_id, data, self._local_comparison_values[client_id])
+                        if result is not None:
+                            results_to_emit.append(result)
+                    if results_to_emit:
+                        self._emit_main_output(results_to_emit)
+                else:
+                    with open(self._spool_path(client_id), "a", encoding="utf-8") as f:
+                        f.write("\n".join(rows) + "\n")
+                        
+        self._spool_buffer.clear()
 
     def process_secondary_input(self, data):
         logging.debug("Nuevo promedio recibido")
@@ -130,6 +163,8 @@ class BarrierFilter(WorkerBaseDoubleIO):
         logging.info(f"Ambos EOF recibidos de cliente {client_id}")
         self._thresholds_ready_by_client.pop(client_id, None)
         self._comparison_values_by_client.pop(client_id, None)
+        self._local_thresholds_ready.discard(client_id)
+        self._local_comparison_values.pop(client_id, None)
         logging.info("Estado del cliente limpiado")
         return iter([])
 
