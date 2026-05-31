@@ -3,9 +3,8 @@ from common.message_protocol import internal
 from common.middleware.worker_base import WorkerBase
 
 import logging
-import os
 import requests
-import signal
+import time
 
 
 class MoneyConversionClient(WorkerBase):
@@ -26,7 +25,10 @@ class MoneyConversionClient(WorkerBase):
             dest_curr = data["destination"]
             if datetime not in self._currency_rates_by_date or \
                     (origin_curr, dest_curr) not in self._currency_rates_by_date[datetime]:
+                start_req_time = time.time()
+                logging.info(f"Conversión pedida a API de {origin_curr} a {dest_curr}")
                 conversion_rate = self._request_api(datetime, origin_curr, dest_curr)
+                logging.info(f"Conversión recibida API de {origin_curr} a {dest_curr}: {conversion_rate} - Demora {time.time() - start_req_time}")
                 self._currency_rates_by_date.setdefault(datetime, {})
                 self._currency_rates_by_date[datetime][(origin_curr, dest_curr)] = conversion_rate
             else:
@@ -45,7 +47,6 @@ class MoneyConversionClient(WorkerBase):
 
 
 if __name__ == "__main__":
-    logger = logging.getLogger(__file__)
-    logger.setLevel(logging.INFO)
+    logging.basicConfig(level=logging.INFO)
     conversion_client = MoneyConversionClient()
     conversion_client.run()
