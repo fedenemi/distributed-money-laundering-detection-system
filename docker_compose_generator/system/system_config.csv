@@ -21,7 +21,7 @@ q4_paths_splitters_by_ends,4
 q4_unique_paths_counters,1
 q5_data_reducer,2
 q5_filter_01092022_05092022,3
-q5_money_converter,1
+q5_money_converter,3
 q5_money_converter_api_client,1
 q5_filter_lt_1_usd,3
 q5_payment_fmt_filter,3

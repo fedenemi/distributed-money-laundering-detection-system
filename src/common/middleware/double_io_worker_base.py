@@ -275,6 +275,7 @@ class WorkerBaseDoubleIO:
 
     def _flush_all_next_stage(self):
         self._flush_all_main_buffer()
+        self._flush_all_sec_buffer()
 
     def _send_main_output_eof(self, client_id=None):
         if self._main_producer is None:

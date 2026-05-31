@@ -62,7 +62,7 @@ class MoneyConverter(WorkerBaseDoubleIO):
         return rates
 
     def _generate_consult_currency_rate(self, timestamp, origin_curr, dest_curr):
-        return {"timestamp": timestamp, "origin": origin_curr, "destination": dest_curr}
+        return {"timestamp": timestamp, "origin": origin_curr, "destination": dest_curr, "sender_id": self.shard_id}
 
     def process_main_input(self, data: dict) -> tuple[list, list]:
         # Get data elements
@@ -75,8 +75,6 @@ class MoneyConverter(WorkerBaseDoubleIO):
         
         rate_key = f"{day}_{origin_code}_{target_code}"
 
-        # --- FAST PATHS ---
-        # Si devuelve en el 2do elemento de la tupla, tu base class hace _emit_sec_output directo
         if origin_code == target_code:
             data_copy["Payment Currency"] = self._target_currency
             return ([], [data_copy])
@@ -84,14 +82,13 @@ class MoneyConverter(WorkerBaseDoubleIO):
         if origin_code == "BTC" and target_code == "USD":
             rate = self._btc_rates_by_day.get(day)
             if rate is None:
-                logging.warning("BTC rate no disponible para %s", day)
+                logging.info("BTC rate no disponible para %s", day)
                 return ([], [])
             data_copy["Payment Currency"] = self._target_currency
             data_copy["Amount Paid"] = float(data["Amount Paid"]) * rate
             self._log_conversion(day, origin_code, target_code, data["Amount Paid"], rate, data_copy["Amount Paid"])
             return ([], [data_copy])
 
-        # --- CACHE Y PENDIENTES ---
         with self._shared_lock:
             if rate_key in self._shared_cache:
                 rate = self._shared_cache[rate_key]
@@ -108,10 +105,8 @@ class MoneyConverter(WorkerBaseDoubleIO):
 
         if is_first_request:
             req = self._generate_consult_currency_rate(day, origin_code, target_code)
-            # Devuelve en el 1er elemento para que se envíe como request a RabbitMQ
             return ([req], [])
 
-        # Se anotó en pendientes pero la request ya fue enviada por otra fila
         return ([], [])
 
 

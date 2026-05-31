@@ -39,6 +39,9 @@ class MoneyConversionClient(WorkerBase):
 
     def on_eof(self, client_id=None):
         return []
+    
+    def _routing_key(self, msg):
+        return msg["sender_id"]
 
 
 if __name__ == "__main__":
