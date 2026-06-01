@@ -278,8 +278,11 @@ class Client:
     def run(self):
         try:
             self.connect()
+            start_time = time.time()
+            logging.info(f"Envío datos desde el cliente")
             self.send_accounts_and_transactions()
             self.recv_query_results()
+            logging.info(f"Resultados recibidos. Tiempo total: {time.time() - start_time}")
         finally:
             if not self.closed:
                 self._close_writers()

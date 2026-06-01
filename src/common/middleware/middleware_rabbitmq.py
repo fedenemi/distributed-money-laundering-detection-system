@@ -9,6 +9,9 @@ from .middleware import MessageMiddlewareQueue, MessageMiddlewareExchange, Messa
 RABBITMQ_HEARTBEAT = int(os.environ.get("RABBITMQ_HEARTBEAT", "3600"))
 RABBITMQ_BLOCKED_CONNECTION_TIMEOUT = int(os.environ.get("RABBITMQ_BLOCKED_CONNECTION_TIMEOUT", "3600"))
 
+QUEUE_PREFETCH_COUNT = 50
+EXCHANGE_PREFETCH_COUNT = 50
+
 def _connection_parameters(host):
     return pika.ConnectionParameters(
         host=host,
@@ -22,6 +25,7 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
         try:
             self.connection = pika.BlockingConnection(_connection_parameters(host))
             self.channel = self.connection.channel()
+            self.channel.confirm_delivery()
             self.queue_name = queue_name
             self.channel.queue_declare(queue=queue_name)
         except Exception:
@@ -43,7 +47,7 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
                     pass
             on_message_callback(body, ack, nack)
         try:
-            #self.channel.basic_qos(prefetch_count=1)
+            self.channel.basic_qos(prefetch_count=QUEUE_PREFETCH_COUNT)
             self.channel.basic_consume(queue=self.queue_name, on_message_callback=callback_wrapper, auto_ack=False)
             self.channel.start_consuming()
         except pika.exceptions.AMQPConnectionError:
@@ -89,6 +93,7 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
         try:
             self.connection = pika.BlockingConnection(_connection_parameters(host))
             self.channel = self.connection.channel()
+            self.channel.confirm_delivery()
 
             self.channel.exchange_declare(exchange=exchange_name, exchange_type='direct', durable=True)
             self.exchange_name = exchange_name
@@ -119,7 +124,7 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
             on_message_callback(body, ack, nack)
         
         try:
-            #self.channel.basic_qos(prefetch_count=1)
+            self.channel.basic_qos(prefetch_count=EXCHANGE_PREFETCH_COUNT)
             self.channel.basic_consume(queue=self.queue_name, on_message_callback=callback_wrapper, auto_ack=False)
             self.channel.start_consuming()
 

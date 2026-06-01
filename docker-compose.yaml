@@ -1424,9 +1424,6 @@ services:
     - AGG_FIELD=count
     - TOTAL_CLIENTS=1
   rabbitmq:
-    build:
-      context: ./src/rabbitmq
-      dockerfile: Dockerfile
     container_name: rabbitmq
     environment:
     - RABBITMQ_LOG_LEVELS=warning
@@ -1436,6 +1433,7 @@ services:
       start_period: 50s
       test: rabbitmq-diagnostics check_port_connectivity
       timeout: 3s
+    image: rabbitmq:3.13-management-alpine
     ports:
     - 5672:5672
     - 15672:15672

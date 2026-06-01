@@ -24,6 +24,7 @@ class ShardedExchangeProducer:
                 _connection_parameters(host)
             )
             self.channel = self.connection.channel()
+            self.channel.confirm_delivery()
             self.channel.exchange_declare(
                 exchange=exchange_name, exchange_type="direct", durable=True
             )

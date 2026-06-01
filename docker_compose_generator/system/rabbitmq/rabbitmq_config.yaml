@@ -1,10 +1,8 @@
 rabbitmq:
-  build:
-    context: ./src/rabbitmq
-    dockerfile: Dockerfile
+  image: rabbitmq:3.13-management-alpine
   container_name: rabbitmq
   environment:
-  - RABBITMQ_LOG_LEVELS=warning
+    - RABBITMQ_LOG_LEVELS=warning
   healthcheck:
     interval: 5s
     retries: 10
@@ -12,5 +10,5 @@ rabbitmq:
     test: rabbitmq-diagnostics check_port_connectivity
     timeout: 3s
   ports:
-  - 5672:5672
-  - 15672:15672
+    - 5672:5672
+    - 15672:15672
