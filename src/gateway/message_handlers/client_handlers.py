@@ -118,11 +118,16 @@ def handle_client_request(
     output_queue,
     output_exchange,
     transaction_columns,
+    client_checkpoints,
+    client_semaphores,
+    checkpoint_barriers,
+    checkpoint_lock
 ):
     handler = message_handler.MessageHandler()
     client_id = None
     output_shards = int(os.environ.get("OUTPUT_SHARDS", "1"))
     gateway_output_batch_size = int(os.environ.get("GATEWAY_OUTPUT_BATCH_SIZE", "2000"))
+    max_in_flight_batches = int(os.environ.get("MAX_IN_FLIGHT_BATCHES", "3"))
     output = _build_output_queue(mom_host, output_queue, output_exchange, output_shards)
 
     try:
@@ -131,10 +136,7 @@ def handle_client_request(
             try:
                 msg_type, payload = message_protocol.external.recv_msg(client_socket)
             except Exception as e:
-                if client_id is None and "0 bytes" in str(e):
-                    logging.warning("Conexión cerrada sin enviar datos.")
-                    client_socket.close() 
-                    return
+                client_socket.close() 
                 raise e
 
             if msg_type in (
@@ -147,6 +149,7 @@ def handle_client_request(
                     client_sockets[client_id] = client_socket
                     client_ready_events[client_id] = threading.Event()
                     client_outboxes[client_id] = queue.Queue()
+                    client_semaphores[client_id] = threading.Semaphore(max_in_flight_batches)
 
                     t_disp = threading.Thread(
                         target=client_dispatcher,
@@ -171,7 +174,8 @@ def handle_client_request(
                     
                     client_ready_events[client_id] = threading.Event()
                     client_outboxes[client_id] = queue.Queue()
-                    
+                    client_semaphores[client_id] = threading.Semaphore(max_in_flight_batches)
+
                     t_disp = threading.Thread(
                         target=client_dispatcher,
                         args=(client_id, client_socket, client_outboxes[client_id], client_ready_events[client_id])
@@ -184,8 +188,11 @@ def handle_client_request(
                 continue
 
             if msg_type == message_protocol.external.MsgType.TRANSACTIONS_BATCH:
+                client_semaphores[client_id].acquire()
+
                 if output is None:
                     output = _build_output_queue(mom_host, output_queue, output_exchange)
+
                 transactions = _rows_to_transactions(client_id, rows, transaction_columns)
                 for transactions_chunk in _chunks(transactions, gateway_output_batch_size):
                     serialized_message = handler.serialize_rows_message(client_id, transactions_chunk)
@@ -195,6 +202,20 @@ def handle_client_request(
                     else:
                         output.send(serialized_message)
 
+                with checkpoint_lock:
+                    current_checkpoint = client_checkpoints.get(client_id, 0) + 1
+                    client_checkpoints[client_id] = current_checkpoint
+                    checkpoint_barriers[(client_id, current_checkpoint)] = set()
+
+                checkpoint_msg = handler.serialize_checkpoint_message(
+                    client_id,
+                    current_checkpoint
+                )
+
+                if isinstance(output, ShardedExchangeProducer):
+                    output.send_eof_to_all(checkpoint_msg)
+                else:
+                    output.send(checkpoint_msg)
                 message_protocol.external.send_msg(client_socket, message_protocol.external.MsgType.ACK, client_id)
                 continue
 
@@ -221,7 +242,6 @@ def handle_client_request(
                     output.send(serialized_message)
 
                 message_protocol.external.send_msg(client_socket, message_protocol.external.MsgType.ACK, client_id)
-
                 client_ready_events[client_id].set()
                 return 
 

@@ -285,6 +285,42 @@ class WorkerBaseDoubleIO:
         self._flush_all_main_buffer()
         self._flush_all_sec_buffer()
 
+    def _send_main_checkpoint(self, client_id, checkpoint_id):
+        if self._main_producer is None:
+            return
+        chk_msg = {"type": "checkpoint", "client_id": client_id, "checkpoint_id": checkpoint_id}
+        chk_body = serialize(chk_msg)
+        self._ensure_main_producer()
+        try:
+            if self.main_output_exchange and self.main_output_shards > 1:
+                self._main_producer.send_eof_to_all(chk_body)
+            else:
+                self._main_producer.send(chk_body)
+        except MessageMiddlewareDisconnectedError:
+            self._ensure_main_producer()
+            if self.main_output_exchange and self.main_output_shards > 1:
+                self._main_producer.send_eof_to_all(chk_body)
+            else:
+                self._main_producer.send(chk_body)
+
+    def _send_sec_checkpoint(self, client_id, checkpoint_id):
+        if self._sec_producer is None:
+            return
+        chk_msg = {"type": "checkpoint", "client_id": client_id, "checkpoint_id": checkpoint_id}
+        chk_body = serialize(chk_msg)
+        self._ensure_sec_producer()
+        try:
+            if self.sec_output_exchange and self.sec_output_shards > 1:
+                self._sec_producer.send_eof_to_all(chk_body)
+            else:
+                self._sec_producer.send(chk_body)
+        except MessageMiddlewareDisconnectedError:
+            self._ensure_sec_producer()
+            if self.sec_output_exchange and self.sec_output_shards > 1:
+                self._sec_producer.send_eof_to_all(chk_body)
+            else:
+                self._sec_producer.send(chk_body)
+
     def _send_main_output_eof(self, client_id=None):
         if self._main_producer is None:
             return
@@ -387,7 +423,34 @@ class WorkerBaseDoubleIO:
         def on_message(body: bytes, ack, nack):
             try:
                 msg = deserialize(body)
-                if msg.get("type") == "eof":
+                if msg.get("type") == "checkpoint":
+                    client_id = msg.get("client_id")
+                    chk_id = msg.get("checkpoint_id")
+                    chk_key = f"{client_id}_{chk_id}"
+  
+                    with self._eof_lock:
+                        self._checkpoints_main[chk_key] = self._checkpoints_main.get(chk_key, 0) + 1
+                        
+                        if self._operation_mode == "PIPELINE":
+                            if self._checkpoints_main[chk_key] >= self.main_n_upstream:
+                                self._flush_all_main_buffer()
+                                self._send_main_checkpoint(client_id, chk_id)
+                                del self._checkpoints_main[chk_key]
+                        else: # JOINER
+                            main_count = self._checkpoints_main[chk_key]
+                            sec_count = self._checkpoints_sec.get(chk_key, 0)
+
+                            if main_count >= self.main_n_upstream and sec_count >= self.sec_n_upstream:
+                                self._flush_all_main_buffer()
+                                self._send_main_checkpoint(client_id, chk_id)
+                                try:
+                                    del self._checkpoints_main[chk_key]
+                                    del self._checkpoints_sec[chk_key]
+                                except KeyError:
+                                    pass
+                    ack()
+                    return
+                elif msg.get("type") == "eof":
                     client_id = msg.get("client_id")
                     if client_id is None:
                         eof_count[0] += 1
@@ -448,7 +511,34 @@ class WorkerBaseDoubleIO:
         def on_message(body: bytes, ack, nack):
             try:
                 msg = deserialize(body)
-                if msg.get("type") == "eof":
+                if msg.get("type") == "checkpoint":
+                    client_id = msg.get("client_id")
+                    chk_id = msg.get("checkpoint_id")
+                    chk_key = f"{client_id}_{chk_id}"
+                    
+                    with self._eof_lock:
+                        self._checkpoints_sec[chk_key] = self._checkpoints_sec.get(chk_key, 0) + 1
+                        
+                        if self._operation_mode == "PIPELINE":
+                            if self._checkpoints_sec[chk_key] >= self.sec_n_upstream:
+                                self._flush_all_sec_buffer()
+                                self._send_sec_checkpoint(client_id, chk_id)
+                                del self._checkpoints_sec[chk_key]
+                        else: # JOINER
+                            main_count = self._checkpoints_main.get(chk_key, 0)
+                            sec_count = self._checkpoints_sec[chk_key]
+                            
+                            if main_count >= self.main_n_upstream and sec_count >= self.sec_n_upstream:
+                                self._flush_all_main_buffer()
+                                self._send_main_checkpoint(client_id, chk_id)
+                                try:
+                                    del self._checkpoints_main[chk_key]
+                                    del self._checkpoints_sec[chk_key]
+                                except KeyError:
+                                    pass
+                    ack()
+                    return
+                elif msg.get("type") == "eof":
                     client_id = msg.get("client_id")
                     if client_id is None:
                         eof_count[0] += 1
@@ -531,6 +621,8 @@ class WorkerBaseDoubleIO:
                          shared_cache,
                          shared_pending,
                          shared_lock,
+                         checkpoints_main,
+                         checkpoints_sec,
                          ):
         logging.basicConfig(level=logging.INFO)
         # Shared variables
@@ -543,6 +635,8 @@ class WorkerBaseDoubleIO:
         self._shared_cache = shared_cache
         self._shared_pending = shared_pending
         self._shared_lock = shared_lock
+        self._checkpoints_main = checkpoints_main
+        self._checkpoints_sec = checkpoints_sec
 
         # Input
         self.main_input_queue     = os.environ.get("MAIN_INPUT_QUEUE", "")
@@ -595,6 +689,8 @@ class WorkerBaseDoubleIO:
                         shared_cache,
                         shared_pending,
                         shared_lock,
+                        checkpoints_main,
+                        checkpoints_sec,
                         ):
         logging.basicConfig(level=logging.INFO)
         # Shared variables
@@ -607,6 +703,8 @@ class WorkerBaseDoubleIO:
         self._shared_cache = shared_cache
         self._shared_pending = shared_pending
         self._shared_lock = shared_lock
+        self._checkpoints_main = checkpoints_main
+        self._checkpoints_sec = checkpoints_sec
 
         # Input
         self.sec_input_queue     = os.environ.get("SECONDARY_INPUT_QUEUE", "")
@@ -666,6 +764,8 @@ class WorkerBaseDoubleIO:
         shared_cache = manager.dict()
         shared_pending = manager.dict()
         shared_lock = manager.Lock()
+        checkpoints_main = manager.dict()
+        checkpoints_sec = manager.dict()
 
         # Create processes
         main_process = multiprocessing.Process(
@@ -679,6 +779,8 @@ class WorkerBaseDoubleIO:
                   shared_cache,
                   shared_pending,
                   shared_lock,
+                  checkpoints_main,
+                  checkpoints_sec,
                   )
         )
         sec_process = multiprocessing.Process(
@@ -692,6 +794,8 @@ class WorkerBaseDoubleIO:
                   shared_cache,
                   shared_pending,
                   shared_lock,
+                  checkpoints_main,
+                  checkpoints_sec,
                   )
         )
 

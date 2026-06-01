@@ -206,13 +206,33 @@ class WorkerBase:
         eof_count = [0]
         eof_per_client = {}
         done_clients = set()
+        checkpoint_counts = {}
 
         def on_message(body: bytes, ack, nack):
             try:
                 t0 = time.perf_counter()
                 msg = deserialize(body)
                 t_deser = time.perf_counter() - t0
-                if msg.get("type") == "eof":
+                if msg.get("type") == "checkpoint":
+                    client_id = msg.get("client_id")
+                    checkpoint_id = msg.get("checkpoint_id")
+                    chk_key = (client_id, checkpoint_id)
+                    checkpoint_counts[chk_key] = checkpoint_counts.get(chk_key, 0) + 1
+                    if checkpoint_counts[chk_key] >= self.n_upstream:
+                        self._flush_all()
+                        checkpoint_body = serialize({
+                            "type": "checkpoint",
+                            "client_id": client_id,
+                            "checkpoint_id": checkpoint_id
+                        })
+                        if self.output_exchange and self.output_shards >= 1:
+                            self._producer.send_eof_to_all(checkpoint_body)
+                        elif self._producer:
+                            self._producer.send(checkpoint_body)
+                        del checkpoint_counts[chk_key]
+                    ack()
+                    return
+                elif msg.get("type") == "eof":
                     t0_eof = time.perf_counter()
                     client_id = msg.get("client_id")
                     if client_id is None:

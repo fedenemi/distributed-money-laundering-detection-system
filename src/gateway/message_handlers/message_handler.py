@@ -13,5 +13,10 @@ class MessageHandler:
             {"type": "eof", "client_id": client_id}
         )
 
+    def serialize_checkpoint_message(self, client_id, checkpoint_id):
+        return message_protocol.internal.serialize(
+            {"type": "checkpoint", "client_id": client_id, "checkpoint_id": checkpoint_id}
+        )
+
     def deserialize_system_message(self, message):
         return message_protocol.internal.deserialize(message)

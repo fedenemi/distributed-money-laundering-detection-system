@@ -16,14 +16,6 @@ def _normalize_bank_id(bank_id):
     return normalized or "0"
 
 
-def _expect_client_ack(client_socket, client_id):
-    msg_type, payload = message_protocol.external.recv_msg(client_socket)
-    if msg_type != message_protocol.external.MsgType.ACK:
-        raise TypeError(f"Expected ACK, got {msg_type}")
-    if payload != client_id:
-        raise ValueError("Client id mismatch in ACK")
-
-
 def _extract_client_id(message, rows, client_sockets):
     client_id = None
     if isinstance(message, dict):
@@ -93,10 +85,8 @@ def _normalize_result_rows(rows, query_id, bank_maps, client_id):
             }
 
         else:
-            # Para queries aún no implementadas, pasamos las claves originales (quitando client_id)
             mapped = {k: v for k, v in row.items() if k != "client_id"}
 
-        # Convertimos los valores a string y los ponemos en una lista 
         row_values = [str(mapped[key]) for key in mapped]
         normalized.append(row_values)
 
@@ -113,7 +103,6 @@ def _handle_query_eof(
     if not outbox:
         return
 
-    # Ponemos las instrucciones en la cola en memoria, no en la red
     outbox.put(("END_QUERY", query_id))
 
     done = list(client_query_eofs.get(client_id, []))
@@ -134,16 +123,44 @@ def handle_client_response(
     client_query_eofs,
     client_outboxes,
     total_queries,
-    n_upstream,  
+    n_upstream,
+    client_semaphores,
+    checkpoint_barriers,
+    checkpoint_lock
 ):
     logging.basicConfig(level=logging.INFO)
-    eof_count = {}  
+    eof_count = {}
+    checkpoint_counts = {} 
     input_queue = middleware.MessageMiddlewareQueueRabbitMQ(mom_host, queue_name)
     handler = message_handler.MessageHandler()
 
     def _consume_result(message, ack, nack):
         try:
             payload = handler.deserialize_system_message(message)
+
+            if isinstance(payload, dict) and payload.get("type") == "checkpoint":
+                client_id = payload.get("client_id")
+                chk_id = payload.get("checkpoint_id")
+                local_chk_key = (client_id, chk_id)
+                checkpoint_counts[local_chk_key] = checkpoint_counts.get(local_chk_key, 0) + 1
+                if checkpoint_counts[local_chk_key] >= n_upstream:
+                    with checkpoint_lock:
+                        barrier_key = (client_id, chk_id)
+                        
+                        if barrier_key not in checkpoint_barriers:
+                            checkpoint_barriers[barrier_key] = set()
+                            
+                        checkpoint_barriers[barrier_key].add(query_id)
+
+                        if len(checkpoint_barriers[barrier_key]) == total_queries:
+                            if client_id in client_semaphores:
+                                client_semaphores[client_id].release()
+                            
+                            del checkpoint_barriers[barrier_key]
+                    del checkpoint_counts[local_chk_key]
+
+                ack()
+                return
 
             if isinstance(payload, dict) and payload.get("type") == "eof":
                 rows = []
@@ -164,7 +181,7 @@ def handle_client_response(
                         client_query_eofs,
                         total_queries,
                     )
-                ack() # Confirmamos rápido a RabbitMQ
+                ack()
                 return
 
             if isinstance(payload, dict):

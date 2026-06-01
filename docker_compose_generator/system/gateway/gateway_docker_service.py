@@ -20,6 +20,8 @@ OUTPUT_QUEUE = "OUTPUT_QUEUE"
 OUTPUT_EXCHANGE = "OUTPUT_EXCHANGE"
 INPUT_QUEUE_PREFIX = "INPUT_QUEUE_PREFIX"
 TOTAL_QUERIES = "TOTAL_QUERIES"
+MAX_IN_FLIGHT_BATCHES = "MAX_IN_FLIGHT_BATCHES"
+TOTAL_MAX_IN_FLIGHT_BATCHES = 20
 
 def get_gateway_docker_services(
     input_query_queue_prefix,
@@ -50,6 +52,11 @@ def get_gateway_docker_services(
     )
     gateway_service_config[DOCKER_ENV_VARS_NAME].append(
         f"{TOTAL_QUERIES}={total_queries}"
+    )
+
+    # Total client's batches in flight
+    gateway_service_config[DOCKER_ENV_VARS_NAME].append(
+        f"{MAX_IN_FLIGHT_BATCHES}={TOTAL_MAX_IN_FLIGHT_BATCHES}"
     )
 
     # Add service name
