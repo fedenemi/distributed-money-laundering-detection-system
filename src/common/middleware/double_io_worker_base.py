@@ -39,6 +39,7 @@ import random
 from common.middleware.middleware_rabbitmq import MessageMiddlewareQueueRabbitMQ, _connection_parameters
 from common.middleware.middleware_sharded import ShardedExchangeConsumer, ShardedExchangeProducer
 from common.middleware.middleware import MessageMiddlewareDisconnectedError, MessageMiddlewareMessageError
+from common.message_protocol.internal import deserialize, serialize
 
 logger = logging.getLogger(__name__)
 
@@ -240,7 +241,7 @@ class WorkerBaseDoubleIO:
         rows = self._main_out_buffer.pop(buf_key, [])
         if not rows:
             return
-        body = json.dumps({"rows": rows}).encode()
+        body = serialize({"rows": rows})
         self._ensure_main_producer()
         try:
             if self.main_output_exchange and self.main_output_shards > 1:
@@ -258,7 +259,7 @@ class WorkerBaseDoubleIO:
         rows = self._sec_out_buffer.pop(buf_key, [])
         if not rows:
             return
-        body = json.dumps({"rows": rows}).encode()
+        body = serialize({"rows": rows})
         self._ensure_sec_producer()
         try:
             if self.sec_output_exchange and self.sec_output_shards > 1:
@@ -290,7 +291,7 @@ class WorkerBaseDoubleIO:
         eof_msg = {"type": "eof"}
         if client_id is not None:
             eof_msg["client_id"] = client_id
-        eof_body = json.dumps(eof_msg).encode()
+        eof_body = serialize(eof_msg)
         self._ensure_main_producer()
         try:
             if self.main_output_exchange and self.main_output_shards > 1:
@@ -310,7 +311,7 @@ class WorkerBaseDoubleIO:
         eof_msg = {"type": "eof"}
         if client_id is not None:
             eof_msg["client_id"] = client_id
-        eof_body = json.dumps(eof_msg).encode()
+        eof_body = serialize(eof_msg)
         self._ensure_sec_producer()
         try:
             if self.sec_output_exchange and self.sec_output_shards > 1:
@@ -385,7 +386,7 @@ class WorkerBaseDoubleIO:
 
         def on_message(body: bytes, ack, nack):
             try:
-                msg = json.loads(body)
+                msg = deserialize(body)
                 if msg.get("type") == "eof":
                     client_id = msg.get("client_id")
                     if client_id is None:
@@ -446,7 +447,7 @@ class WorkerBaseDoubleIO:
 
         def on_message(body: bytes, ack, nack):
             try:
-                msg = json.loads(body)
+                msg = deserialize(body)
                 if msg.get("type") == "eof":
                     client_id = msg.get("client_id")
                     if client_id is None:

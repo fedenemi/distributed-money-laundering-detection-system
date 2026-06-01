@@ -142,7 +142,7 @@ class Client:
                 self._send_csv_batch(msg_type, csv_buffer, batch_count)
                 total_sent += batch_count
                 if progress_label and total_sent >= next_progress_log:
-                    logging.info(f"Sent {total_sent} {progress_label} rows to gateway")
+                    logging.info(f"Sent a total of {total_sent} {progress_label} rows to gateway")
                     next_progress_log += PROGRESS_LOG_EVERY
                 csv_buffer = io.StringIO(newline="")
                 csv_writer = csv.writer(csv_buffer, lineterminator="\n")
