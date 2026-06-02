@@ -15,7 +15,7 @@ q4_data_reducer,3
 q4_filter_01092022_05092022_prefix,3
 q4_splitters_by_origin_and_dest_prefix,3
 q4_transaction_graph,4
-q4_graphs_edges_splitters,1
+q4_graphs_edges_splitters,4
 q4_paths_creators,4
 q4_paths_splitters_by_ends,4
 q4_unique_paths_counters,1

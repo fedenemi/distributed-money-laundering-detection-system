@@ -14,7 +14,6 @@ ACCOUNTS_FILE = os.environ["ACCOUNTS_FILE"]
 SERVER_HOST = os.environ["SERVER_HOST"]
 SERVER_PORT = int(os.environ["SERVER_PORT"])
 
-# normalizamos a string
 CLIENT_ID = str(os.environ["CLIENT_ID"])
 
 RESULTS_DIR = os.environ.get("RESULTS_DIR", "/results")

@@ -13,10 +13,11 @@ services:
     - SERVER_HOST=gateway
     - SERVER_PORT=7659
     - BATCH_SIZE=5000
-    - TRANSACTIONS_FILE=/datasets/LI-Small_Trans.csv
-    - ACCOUNTS_FILE=/datasets/LI-Small_accounts.csv
+    - TRANSACTIONS_FILE=/datasets/LI-Medium_Trans.csv
+    - ACCOUNTS_FILE=/datasets/LI-Medium_accounts.csv
     - CLIENT_ID=0
     - RESULTS_DIR=/results
+    - BATCH_SIZE=20000
     volumes:
     - ./datasets:/datasets
     - ./results:/results
