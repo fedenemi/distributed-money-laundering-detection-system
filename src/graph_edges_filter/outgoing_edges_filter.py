@@ -56,6 +56,8 @@ class OutgoingEdgesFilter(WorkerBase):
                 if len(current_destinations) > self._min_outgoing_edges:
                     for sent_elem in current_destinations:
                         yield {
+                            "client_id": client_id,
+                            "Type For Interm": "i",
                             "From Bank" : prev_elem_id[0],
                             "Account" : prev_elem_id[1],
                             "To Bank" : sent_elem[0],
@@ -70,6 +72,8 @@ class OutgoingEdgesFilter(WorkerBase):
         if prev_elem_id is not None and len(current_destinations) > self._min_outgoing_edges:
             for sent_elem in current_destinations:
                 yield {
+                    "client_id": client_id,
+                    "Type For Interm": "i",
                     "From Bank" : prev_elem_id[0],
                     "Account" : prev_elem_id[1],
                     "To Bank" : sent_elem[0],

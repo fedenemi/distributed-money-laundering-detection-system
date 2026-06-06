@@ -56,6 +56,8 @@ class IncomingEdgesFilter(WorkerBase):
                 if len(current_origins) > self._min_incoming:
                     for origin in current_origins:
                         yield {
+                            "client_id": client_id,
+                            "Type For Interm": "o",
                             "From Bank" : origin[0],
                             "Account" : origin[1],
                             "To Bank" : prev_dest_id[0],
@@ -70,6 +72,8 @@ class IncomingEdgesFilter(WorkerBase):
         if prev_dest_id is not None and len(current_origins) > self._min_incoming:
             for origin in current_origins:
                 yield {
+                    "client_id": client_id,
+                    "Type For Interm": "o",
                     "From Bank" : origin[0],
                     "Account" : origin[1],
                     "To Bank" : prev_dest_id[0],

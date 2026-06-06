@@ -1,50 +1,42 @@
 import logging
-import os
-from collections import defaultdict
 from common.middleware.worker_base import WorkerBase
 
 class PathsAggregator(WorkerBase):
 
     def __init__(self):
         super().__init__()
-        self.min_paths = int(os.environ.get("MIN_PATHS", "5"))
-        self.total_pair_counts = defaultdict(lambda: defaultdict(int))
+        self.total_pair_counts = {}
 
     def process(self, data):
         client_id = data["client_id"]
-        
-        pair = (data["Origin"], data["Dest"])
-        total_paths = data["PathsCount"]
-
-        self.total_pair_counts[client_id][pair] += total_paths
+        origin_and_dest = (data["From Bank"], data["Account"], data["To Bank"], data["Account.1"])
+        if client_id not in self.total_pair_counts:
+            self.total_pair_counts[client_id] = {}
+        if origin_and_dest not in self.total_pair_counts[client_id]:
+            self.total_pair_counts[client_id][origin_and_dest] = 1
+        else:
+            self.total_pair_counts[client_id][origin_and_dest] += 1
 
         return []
 
     def on_eof(self, client_id=None):
-        if client_id is None:
-            for c_id in list(self.total_pair_counts.keys()):
-                yield from self.on_eof(c_id)
-            return
+        if client_id is not None and client_id in self.total_pair_counts:
+            unique_accounts = set()
 
-        if client_id not in self.total_pair_counts:
-            return
+            for (origin_bank, origin_acc, dest_bank, dest_acc), count in self.total_pair_counts[client_id].items():
+                unique_accounts.add((origin_bank, origin_acc))
+                unique_accounts.add((dest_bank, dest_acc))
 
-        valid_accounts = set()
+            for bank, account in unique_accounts:
+                yield {
+                    "client_id": client_id,
+                    "Bank": bank,
+                    "Account": account
+                }
 
-        for (origen, destino), total in self.total_pair_counts[client_id].items():
-            if total >= self.min_paths:
-                valid_accounts.add(origen)
-                valid_accounts.add(destino)
-
-        for acc in sorted(list(valid_accounts)):
-            bank, acc_id = acc.split(',')
-            yield {
-                "client_id": client_id,
-                "Bank": bank,
-                "Account": acc_id
-            }
-
-        del self.total_pair_counts[c_id]
+            del self.total_pair_counts[client_id]
+            
+        return []
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
