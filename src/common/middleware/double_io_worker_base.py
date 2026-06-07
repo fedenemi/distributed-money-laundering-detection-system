@@ -71,6 +71,9 @@ class WorkerBaseDoubleIO:
         self.main_n_upstream = int(os.environ.get("MAIN_N_UPSTREAM", "1"))
         self.sec_n_upstream  = int(os.environ.get("SECONDARY_N_UPSTREAM", "1"))
 
+        self.main_eof_dest = os.environ.get("MAIN_EOF_DEST", "MAIN")
+        self.sec_eof_dest = os.environ.get("SEC_EOF_DEST", "SECONDARY")
+
         # Configuration
         self._operation_mode = os.environ["OP_MODE"]
         self._results_buffer_next_stage = []
@@ -367,8 +370,11 @@ class WorkerBaseDoubleIO:
                 for result in self.on_main_input_eof(client_id):
                     self._emit_results_main_stage([result])
                 self._flush_all_next_stage()
-                # Propagate EOF to main output so downstream (e.g., API client) can finish.
-                self._send_main_output_eof(client_id)
+                # Propagate EOF to main output so downstream can finish.
+                if self.main_eof_dest in ["MAIN", "BOTH"]:
+                    self._send_main_output_eof(client_id)
+                if self.main_eof_dest in ["SECONDARY", "BOTH"]:
+                    self._send_sec_output_eof(client_id)
         else: #For joiner, check if joiner action is necessary
             with self._eof_lock:
                 if self._clients_joined.get(client_id, False):
@@ -391,7 +397,11 @@ class WorkerBaseDoubleIO:
                 for result in self.on_secondary_input_eof(client_id):
                     self._emit_sec_output([result])
                 self._flush_all_sec_buffer()
-                self._send_sec_output_eof(client_id)
+                # Propagate EOF to main output so downstream can finish.
+                if self.sec_eof_dest in ["MAIN", "BOTH"]:
+                    self._send_main_output_eof(client_id)
+                if self.sec_eof_dest in ["SECONDARY", "BOTH"]:
+                    self._send_sec_output_eof(client_id)
         else: # For joiner, check if joiner action is necessary
             with self._eof_lock:
                 if self._clients_joined.get(client_id, False):

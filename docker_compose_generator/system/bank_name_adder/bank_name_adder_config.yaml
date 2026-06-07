@@ -1,0 +1,11 @@
+build:
+  context: ./src
+  dockerfile: bank_name_adder/Dockerfile
+depends_on:
+  rabbitmq:
+    condition: service_healthy
+container_name: bank_name_adder
+environment:
+- MOM_HOST=rabbitmq
+- PYTHONUNBUFFERED=1
+- OP_MODE=PIPELINE

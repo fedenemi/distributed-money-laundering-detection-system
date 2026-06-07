@@ -18,6 +18,8 @@ DOCKER_ENV_VARS_NAME = "environment"
 
 OUTPUT_QUEUE = "OUTPUT_QUEUE"
 OUTPUT_EXCHANGE = "OUTPUT_EXCHANGE"
+BANK_OUTPUT_QUEUE = "BANK_OUTPUT_QUEUE"
+BANK_OUTPUT_EXCHANGE = "BANK_OUTPUT_EXCHANGE"
 INPUT_QUEUE_PREFIX = "INPUT_QUEUE_PREFIX"
 TOTAL_QUERIES = "TOTAL_QUERIES"
 MAX_IN_FLIGHT_BATCHES = "MAX_IN_FLIGHT_BATCHES"
@@ -28,6 +30,8 @@ def get_gateway_docker_services(
     total_queries,
     output_queue=None,
     output_exchange=None,
+    banks_out_queue=None,
+    banks_out_exch=None,
 ):
     # Open config file
     base_path = os.path.dirname(__file__)
@@ -45,7 +49,12 @@ def get_gateway_docker_services(
         gateway_service_config[DOCKER_ENV_VARS_NAME].append(f"{OUTPUT_QUEUE}={output_queue}")
     elif output_exchange is not None:
         gateway_service_config[DOCKER_ENV_VARS_NAME].append(f"{OUTPUT_EXCHANGE}={output_exchange}")
-    
+
+    if banks_out_queue is not None:
+        gateway_service_config[DOCKER_ENV_VARS_NAME].append(f"{BANK_OUTPUT_QUEUE}={banks_out_queue}")
+    elif banks_out_exch is not None:
+        gateway_service_config[DOCKER_ENV_VARS_NAME].append(f"{BANK_OUTPUT_EXCHANGE}={banks_out_exch}")
+
     # Total queries and input queue prefix for result queues
     gateway_service_config[DOCKER_ENV_VARS_NAME].append(
         f"{INPUT_QUEUE_PREFIX}={input_query_queue_prefix}"

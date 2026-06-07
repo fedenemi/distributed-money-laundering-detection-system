@@ -31,7 +31,7 @@ def _extract_client_id(message, rows, client_sockets):
     return client_id
 
 
-def _normalize_result_rows(rows, query_id, bank_maps, client_id):
+def _normalize_result_rows(rows, query_id, client_id):
     normalized = []
     for row in rows:
         if not isinstance(row, dict):
@@ -50,13 +50,8 @@ def _normalize_result_rows(rows, query_id, bank_maps, client_id):
             
         elif query_id == 2:
             # Q2: bank_name, from_account, amount
-            bank_id = str(row.get("From Bank", "")).strip()
-            bank_map = bank_maps.get(client_id, {})
-            bank_name = bank_map.get(bank_id)
-            if bank_name is None:
-                bank_name = bank_map.get(_normalize_bank_id(bank_id), bank_id)
             mapped = {
-                "bank_name": bank_name,
+                "bank_name": row.get("Bank Name", ""),
                 "from_account": row.get("Account", ""),
                 "amount": row.get("Amount Paid", 0),
             }
@@ -119,7 +114,6 @@ def handle_client_response(
     query_id,
     mom_host,
     client_sockets,
-    bank_maps,
     client_query_eofs,
     client_outboxes,
     total_queries,
@@ -209,7 +203,7 @@ def handle_client_response(
                 ack()
                 return
 
-            normalized_rows = _normalize_result_rows(rows, query_id, bank_maps, client_id)
+            normalized_rows = _normalize_result_rows(rows, query_id, client_id)
 
             if normalized_rows:
                 client_outboxes[client_id].put(("ROWS", (query_id, normalized_rows)))

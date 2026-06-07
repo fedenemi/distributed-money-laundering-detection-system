@@ -5,6 +5,7 @@ q1_filter_lt_50,2
 q2_splitter_by_bank,3
 q2_data_reducer,2
 q2_aggregator,2
+q2_banks_name_adder,2
 q3_data_reducer,3
 q3_filter_06092022_15092022,3
 q3_filter_01092022_05092022,3

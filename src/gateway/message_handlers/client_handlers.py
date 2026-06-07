@@ -11,25 +11,6 @@ import os
 from common.middleware.middleware_sharded import ShardedExchangeProducer 
 
 
-def _normalize_bank_id(bank_id):
-    if bank_id is None:
-        return None
-    normalized = str(bank_id).strip()
-    normalized = normalized.lstrip("0")
-    return normalized or "0"
-
-def _update_bank_map(bank_maps, client_id, rows):
-    bank_map = dict(bank_maps.get(client_id, {}))
-    for row in rows:
-        if len(row) < 2:
-            continue
-        bank_name, bank_id = row[0], row[1]
-        bank_id = str(bank_id).strip()
-        bank_map[bank_id] = bank_name
-        bank_map[_normalize_bank_id(bank_id)] = bank_name
-    bank_maps[client_id] = bank_map
-
-
 def _rows_to_transactions(client_id, rows, transaction_columns):
     for row in rows:
         if len(row) != len(transaction_columns):
@@ -54,6 +35,13 @@ def _chunks(items, size):
 from common.middleware.middleware_sharded import ShardedExchangeProducer
 
 def _build_output_queue(mom_host, output_queue, output_exchange, output_shards=1):
+    if output_queue:
+        return middleware.MessageMiddlewareQueueRabbitMQ(mom_host, output_queue)
+    if output_exchange:
+        return ShardedExchangeProducer(mom_host, output_exchange, output_shards)
+    raise Exception("FATAL: no output given for data processing")
+
+def _build_banks_output(mom_host, output_queue, output_exchange, output_shards=1):
     if output_queue:
         return middleware.MessageMiddlewareQueueRabbitMQ(mom_host, output_queue)
     if output_exchange:
@@ -94,11 +82,12 @@ def client_dispatcher(client_id, client_socket, outbox, ack_queue, send_lock):
 def handle_client_request(
     client_socket,
     client_sockets,
-    bank_maps,
     client_outboxes,
     mom_host,
     output_queue,
     output_exchange,
+    banks_out_queue,
+    banks_out_exchange,
     transaction_columns,
     client_checkpoints,
     client_semaphores,
@@ -110,9 +99,12 @@ def handle_client_request(
     handler = message_handler.MessageHandler()
     client_id = None
     output_shards = int(os.environ.get("OUTPUT_SHARDS", "1"))
+    banks_output_shards = int(os.environ.get("BANKS_OUTPUT_SHARDS", "1"))
+
     gateway_output_batch_size = int(os.environ.get("GATEWAY_OUTPUT_BATCH_SIZE", "2000"))
     max_in_flight_batches = int(os.environ.get("MAX_IN_FLIGHT_BATCHES", "3"))
     output = _build_output_queue(mom_host, output_queue, output_exchange, output_shards)
+    banks_output = _build_banks_output(mom_host, banks_out_queue, banks_out_exchange, banks_output_shards)
 
     try:
         client_socket.setblocking(True)
@@ -154,7 +146,19 @@ def handle_client_request(
                     raise ValueError("Client id mismatch in request stream")
 
             if msg_type == message_protocol.external.MsgType.ACCOUNTS_BATCH:
-                _update_bank_map(bank_maps, client_id, rows)
+                account_dicts = []
+                for row in rows:
+                    account_dicts.append({"bank_name": row[0], "bank_id": str(row[1]).strip()})
+
+                # Send bank names over to worker
+                for chunk in _chunks(account_dicts, gateway_output_batch_size):
+                    serialized_message = handler.serialize_rows_message(client_id, chunk)
+                    if isinstance(banks_output, ShardedExchangeProducer):
+                        for shard in range(banks_output_shards):
+                            banks_output.send_to_shard(serialized_message, shard)
+                    else:
+                        banks_output.send(serialized_message)
+
                 with client_send_locks[client_id]:
                     message_protocol.external.send_msg(client_socket, message_protocol.external.MsgType.ACK, client_id)
                 continue
@@ -178,6 +182,12 @@ def handle_client_request(
                     t_disp.start()
                 elif msg_client_id != client_id:
                     raise ValueError("Client id mismatch in end accounts")
+                
+                serialized_eof = handler.serialize_eof_message(client_id)
+                if isinstance(banks_output, ShardedExchangeProducer):
+                    banks_output.send_eof_to_all(serialized_eof)
+                else:
+                    banks_output.send(serialized_eof)
                 
                 with client_send_locks[client_id]:
                     message_protocol.external.send_msg(client_socket, message_protocol.external.MsgType.ACK, client_id)
@@ -269,4 +279,6 @@ def handle_client_request(
     finally:
         if output is not None:
             output.close()
+        if banks_output is not None:
+            banks_output.close()
         logging.info(f"Terminó la recepción de datos de entrada para el cliente {client_id}.")

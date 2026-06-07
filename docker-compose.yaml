@@ -13,8 +13,8 @@ services:
     - SERVER_HOST=gateway
     - SERVER_PORT=7659
     - BATCH_SIZE=5000
-    - TRANSACTIONS_FILE=/datasets/LI-Medium_Trans.csv
-    - ACCOUNTS_FILE=/datasets/LI-Medium_accounts.csv
+    - TRANSACTIONS_FILE=/datasets/LI-Small_Trans.csv
+    - ACCOUNTS_FILE=/datasets/LI-Small_accounts.csv
     - CLIENT_ID=0
     - RESULTS_DIR=/results
     - BATCH_SIZE=20000
@@ -36,10 +36,12 @@ services:
     - SERVER_PORT=7659
     - GATEWAY_OUTPUT_BATCH_SIZE=10000
     - OUTPUT_EXCHANGE=gateway_exc
+    - BANK_OUTPUT_EXCHANGE=q2_banks_exchange
     - INPUT_QUEUE_PREFIX=results
     - TOTAL_QUERIES=5
     - MAX_IN_FLIGHT_BATCHES=1200
     - OUTPUT_SHARDS=2
+    - BANK_OUTPUT_SHARDS=2
     - QUERY_1_N_UPSTREAM=2
     - QUERY_2_N_UPSTREAM=2
     - QUERY_3_N_UPSTREAM=3
@@ -158,13 +160,14 @@ services:
     - CONSUMER_GROUP=q2_aggregator
     - SHARD_ID=0
     - N_UPSTREAM=2
-    - OUTPUT_QUEUE=results_2
+    - OUTPUT_EXCHANGE=q2_results_formatter
     - AGG_OP=max
     - AGG_FIELD=Amount Paid
     - KEY_FIELD=From Bank
     - CARRY_FIELDS=Account
     - TOTAL_CLIENTS=1
     - BATCH_SIZE=5000
+    - OUTPUT_SHARDS=2
   q2_aggregator_1:
     build:
       context: ./src
@@ -180,13 +183,58 @@ services:
     - CONSUMER_GROUP=q2_aggregator
     - SHARD_ID=1
     - N_UPSTREAM=2
-    - OUTPUT_QUEUE=results_2
+    - OUTPUT_EXCHANGE=q2_results_formatter
     - AGG_OP=max
     - AGG_FIELD=Amount Paid
     - KEY_FIELD=From Bank
     - CARRY_FIELDS=Account
     - TOTAL_CLIENTS=1
     - BATCH_SIZE=5000
+    - OUTPUT_SHARDS=2
+  q2_banks_name_adder_0:
+    build:
+      context: ./src
+      dockerfile: bank_name_adder/Dockerfile
+    container_name: q2_banks_name_adder_0
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - OP_MODE=PIPELINE
+    - MAIN_INPUT_EXCHANGE=q2_results_formatter
+    - CONSUMER_GROUP=q2_banks_name_adder
+    - SHARD_ID=0
+    - SECONDARY_INPUT_EXCHANGE=q2_banks_exchange
+    - SHARD_ID=0
+    - MAIN_N_UPSTREAM=2
+    - SECONDARY_N_UPSTREAM=1
+    - SECONDARY_OUTPUT_QUEUE=results_2
+    - MAIN_EOF_DEST=SECONDARY
+    - SEC_EOF_DEST=NONE
+  q2_banks_name_adder_1:
+    build:
+      context: ./src
+      dockerfile: bank_name_adder/Dockerfile
+    container_name: q2_banks_name_adder_1
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+    - MOM_HOST=rabbitmq
+    - PYTHONUNBUFFERED=1
+    - OP_MODE=PIPELINE
+    - MAIN_INPUT_EXCHANGE=q2_results_formatter
+    - CONSUMER_GROUP=q2_banks_name_adder
+    - SHARD_ID=1
+    - SECONDARY_INPUT_EXCHANGE=q2_banks_exchange
+    - SHARD_ID=1
+    - MAIN_N_UPSTREAM=2
+    - SECONDARY_N_UPSTREAM=1
+    - SECONDARY_OUTPUT_QUEUE=results_2
+    - MAIN_EOF_DEST=SECONDARY
+    - SEC_EOF_DEST=NONE
   q2_data_reducer_0:
     build:
       context: ./src
@@ -1379,6 +1427,8 @@ services:
     - MAIN_OUTPUT_QUEUE=q5_reqs_currency_rates_api
     - SECONDARY_OUTPUT_EXCHANGE=q5_converted_amounts_exc
     - SEC_OUTPUT_SHARDS=1
+    - MAIN_EOF_DEST=MAIN
+    - SEC_EOF_DEST=SECONDARY
     - TARGET_CURRENCY=US Dollar
     - BATCH_SIZE=1
     - SEC_BATCH_SIZE=5000
@@ -1405,6 +1455,8 @@ services:
     - MAIN_OUTPUT_QUEUE=q5_reqs_currency_rates_api
     - SECONDARY_OUTPUT_EXCHANGE=q5_converted_amounts_exc
     - SEC_OUTPUT_SHARDS=1
+    - MAIN_EOF_DEST=MAIN
+    - SEC_EOF_DEST=SECONDARY
     - TARGET_CURRENCY=US Dollar
     - BATCH_SIZE=1
     - SEC_BATCH_SIZE=5000
@@ -1431,6 +1483,8 @@ services:
     - MAIN_OUTPUT_QUEUE=q5_reqs_currency_rates_api
     - SECONDARY_OUTPUT_EXCHANGE=q5_converted_amounts_exc
     - SEC_OUTPUT_SHARDS=1
+    - MAIN_EOF_DEST=MAIN
+    - SEC_EOF_DEST=SECONDARY
     - TARGET_CURRENCY=US Dollar
     - BATCH_SIZE=1
     - SEC_BATCH_SIZE=5000

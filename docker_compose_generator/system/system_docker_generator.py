@@ -1,4 +1,5 @@
 from .aggregator.aggregator_docker_service import get_aggregator_docker_services
+from .bank_name_adder.bank_name_adder_service import get_bank_name_adders_services
 from .barrier_filter.barrier_filter_docker_service import get_barrier_filters_services
 from .data_reducer.data_reducer_docker_service import get_data_reducer_docker_services
 from .filter.filter_docker_service import get_filters_docker_services
@@ -30,13 +31,6 @@ def generate_system_docker_compose(total_clients=0):
     with open(csv_path, mode="r") as config_file:
         # Get config file reader
         config_file_reader = csv.DictReader(config_file)
-
-        # Create gateway (publica en exchange shardeado)
-        gateway = get_gateway_docker_services(
-            input_query_queue_prefix="results",
-            total_queries=5,
-            output_exchange="gateway_exc",
-        )
         
         usd_prefix, usd_instances = _get_next_config_row(config_file_reader)
         reducer_prefix, reducer_instances = _get_next_config_row(config_file_reader)
@@ -45,6 +39,7 @@ def generate_system_docker_compose(total_clients=0):
         q2_splitter_prefix, q2_splitter_instances = _get_next_config_row(config_file_reader)
         q2_reducer_prefix, q2_reducer_instances = _get_next_config_row(config_file_reader)
         q2_aggregator_prefix, q2_aggregator_instances = _get_next_config_row(config_file_reader)
+        q2_bank_names_adder_prefix, q2_bank_names_adder_instances = _get_next_config_row(config_file_reader)
 
         q3_data_reducer_prefix, q3_data_reducer_instances = _get_next_config_row(config_file_reader)
         q3_filter_06092022_15092022_prefix, q3_filter_06092022_15092022_instances = _get_next_config_row(config_file_reader)
@@ -71,7 +66,16 @@ def generate_system_docker_compose(total_clients=0):
         q5_counter_prefix, q5_counter_instances = _get_next_config_row(config_file_reader)
         q5_totals_sumer_prefix, q5_totals_sumer_instances = _get_next_config_row(config_file_reader)
 
+        # Create gateway
+        gateway = get_gateway_docker_services(
+            input_query_queue_prefix="results",
+            total_queries=5,
+            output_exchange="gateway_exc",
+            banks_out_exch="q2_banks_exchange",
+        )
+
         gateway["gateway"]["environment"].append(f"OUTPUT_SHARDS={usd_instances}")
+        gateway["gateway"]["environment"].append(f"BANK_OUTPUT_SHARDS={q2_bank_names_adder_instances}")
         gateway["gateway"]["environment"].append(f"QUERY_1_N_UPSTREAM={filter_instances}")
         gateway["gateway"]["environment"].append(f"QUERY_2_N_UPSTREAM={q2_aggregator_instances}")
         gateway["gateway"]["environment"].append(f"QUERY_3_N_UPSTREAM={q3_avg_and_transactions_joiner_instances}")
@@ -151,7 +155,7 @@ def generate_system_docker_compose(total_clients=0):
         q2_aggregators = get_aggregator_docker_services(
             q2_aggregator_prefix, q2_aggregator_instances,
             input_exchange="q2_reduced_exc",
-            output_queue="results_2",
+            output_exchange="q2_results_formatter",
             agg_op="max", agg_field="Amount Paid", key_field="From Bank",
             carry_fields=["Account"],
             n_upstream=q2_reducer_instances,
@@ -159,7 +163,18 @@ def generate_system_docker_compose(total_clients=0):
         )
         for name, config in q2_aggregators.items():
             config["environment"].append("BATCH_SIZE=5000")
+            config["environment"].append(f"OUTPUT_SHARDS={q2_bank_names_adder_instances}")
         system = system | q2_aggregators
+
+        q2_bank_names_adders = get_bank_name_adders_services(
+            q2_bank_names_adder_prefix, q2_bank_names_adder_instances,
+            main_input_exchange="q2_results_formatter",
+            main_n_upstream=q2_aggregator_instances,
+            sec_input_exchange="q2_banks_exchange",
+            sec_n_upstream=1,
+            sec_output_queue="results_2",
+        )
+        system = system | q2_bank_names_adders
 
         # =========================================================
         # QUERY 3

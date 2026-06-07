@@ -14,6 +14,8 @@ def main():
     MOM_HOST = os.environ.get("MOM_HOST", "rabbitmq")
     OUTPUT_QUEUE = os.environ.get("OUTPUT_QUEUE", "")
     OUTPUT_EXCHANGE = os.environ.get("OUTPUT_EXCHANGE", "")
+    BANK_OUTPUT_QUEUE = os.environ.get("BANK_OUTPUT_QUEUE", "")
+    BANK_OUTPUT_EXCHANGE = os.environ.get("BANK_OUTPUT_EXCHANGE", "")
 
     transaction_columns_raw = os.environ.get("TRANSACTION_COLUMNS", "")
     TRANSACTION_COLUMNS = [
@@ -37,7 +39,6 @@ def main():
 
     # Diccionarios estándar y el Lock
     client_sockets = {}
-    bank_maps = {}
     client_query_eofs = {}
     client_outboxes = {}
     client_checkpoints = {}
@@ -61,7 +62,6 @@ def main():
             kwargs={
                 "queue_name": queue_name,
                 "client_sockets": client_sockets,
-                "bank_maps": bank_maps,
                 "client_query_eofs": client_query_eofs,
                 "client_outboxes": client_outboxes,
                 "mom_host": MOM_HOST,
@@ -89,11 +89,12 @@ def main():
                 args=(
                     client_socket,
                     client_sockets,
-                    bank_maps,
                     client_outboxes,
                     MOM_HOST,
                     OUTPUT_QUEUE,
                     OUTPUT_EXCHANGE,
+                    BANK_OUTPUT_QUEUE,
+                    BANK_OUTPUT_EXCHANGE,
                     TRANSACTION_COLUMNS,
                     client_checkpoints,
                     client_semaphores,

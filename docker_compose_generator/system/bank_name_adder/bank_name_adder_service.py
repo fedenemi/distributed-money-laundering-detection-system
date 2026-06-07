@@ -4,7 +4,7 @@ import yaml
 
 # Config file
 BASE_DIR = os.path.dirname(__file__)
-CONFIG_FILE = os.path.join(BASE_DIR, "money_converter_config.yaml")
+CONFIG_FILE = os.path.join(BASE_DIR, "bank_name_adder_config.yaml")
 
 # Build section
 DOCKER_BUILD_SECTION_NAME = "build"
@@ -28,11 +28,9 @@ MAIN_OUTPUT_QUEUE_TAG = "MAIN_OUTPUT_QUEUE"
 MAIN_OUTPUT_EXCHANGE_TAG = "MAIN_OUTPUT_EXCHANGE"
 SEC_OUTPUT_QUEUE_TAG = "SECONDARY_OUTPUT_QUEUE"
 SEC_OUTPUT_EXCHANGE_TAG = "SECONDARY_OUTPUT_EXCHANGE"
+SEC_OUTPUT_SHARDS_TAG = "SECONDARY_OUTPUT_SHARDS"
 
-## Target currency
-TARGET_CURRENCY_TAG = "TARGET_CURRENCY"
-
-def get_money_converters_services(service_prefix, total_instances, target_currency,
+def get_bank_name_adders_services(service_prefix, total_instances,
                         main_input_queue=None, main_input_exchange=None, main_n_upstream=None,
                         sec_input_queue=None, sec_input_exchange=None, sec_n_upstream=None,
                         main_output_queue=None, main_output_exchange=None,
@@ -40,13 +38,13 @@ def get_money_converters_services(service_prefix, total_instances, target_curren
                         main_output_shards=1, sec_output_shards=1,
                         ):
     with open(CONFIG_FILE, "r") as config_file:
-        base_money_converter_service = yaml.safe_load(config_file)
+        base_bank_name_adder_service = yaml.safe_load(config_file)
 
     # Create all services
     aggregator_services = {}
     for i in range(total_instances):
         # Copy service base configuration
-        new_service_config = copy.deepcopy(base_money_converter_service)
+        new_service_config = copy.deepcopy(base_bank_name_adder_service)
 
         # Add container name
         new_service_name = f"{service_prefix}_{i}"
@@ -89,13 +87,10 @@ def get_money_converters_services(service_prefix, total_instances, target_curren
         elif sec_output_exchange is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{SEC_OUTPUT_EXCHANGE_TAG}={sec_output_exchange}")
             if sec_output_shards >= 1:
-                new_service_config[DOCKER_ENV_VARS_NAME].append(f"SEC_OUTPUT_SHARDS={sec_output_shards}")
+                new_service_config[DOCKER_ENV_VARS_NAME].append(f"{SEC_OUTPUT_SHARDS_TAG}={sec_output_shards}")
 
-        new_service_config[DOCKER_ENV_VARS_NAME].append("MAIN_EOF_DEST=MAIN")
-        new_service_config[DOCKER_ENV_VARS_NAME].append("SEC_EOF_DEST=SECONDARY")
-
-        ## Target currency
-        new_service_config[DOCKER_ENV_VARS_NAME].append(f"{TARGET_CURRENCY_TAG}={target_currency}")
+        new_service_config[DOCKER_ENV_VARS_NAME].append("MAIN_EOF_DEST=SECONDARY")
+        new_service_config[DOCKER_ENV_VARS_NAME].append("SEC_EOF_DEST=NONE")
 
         # Add service in services dictionary
         aggregator_services[new_service_name] = new_service_config
