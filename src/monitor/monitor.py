@@ -49,6 +49,15 @@ def _restart(container_name: str):
 
 def _check_all():
     for worker in WORKERS:
+        try:
+            c = _docker.containers.get(worker)
+            if c.status == "exited" and c.attrs.get("State", {}).get("ExitCode") == 0:
+                continue  # Ignorar workers que cerraron con éxito y terminaron su flujo
+        except docker.errors.NotFound:
+            pass
+        except Exception as e:
+            logger.debug(f"[MONITOR] No se pudo inspeccionar {worker}: {e}")
+
         alive = _ping(worker)
         if alive:
             _failed_counts[worker] = 0

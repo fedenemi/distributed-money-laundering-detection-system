@@ -1,6 +1,7 @@
 import logging
 import socket
 import time
+import hashlib
 
 from message_handlers import message_handler
 from common import middleware, message_protocol
@@ -112,13 +113,7 @@ def _handle_query_eof(
     if len(done) >= total_queries:
         outbox.put(("END_RESULTS", None))
 
-        # Al finalizar todas las queries de un cliente, publicar cleanup
-        cleanup_exchange = ShardedExchangeProducer(mom_host, "cleanup_exc", 1)
-        cleanup_msg = message_protocol.internal.serialize(
-            {"type": "cleanup", "client_id": client_id}
-        )
-        cleanup_exchange.send_to_shard(cleanup_msg, 0)
-        cleanup_exchange.close()
+
 
 
 def handle_client_response(
@@ -135,8 +130,9 @@ def handle_client_response(
     checkpoint_lock
 ):
     logging.basicConfig(level=logging.INFO)
-    eof_count = {}
-    checkpoint_counts = {} 
+    eof_senders = {}
+    checkpoint_senders = {}
+    completed_checkpoints = set()
     # Retry connecting to RabbitMQ up to 5 times
     max_retries = 5
     for attempt in range(max_retries):
@@ -153,14 +149,26 @@ def handle_client_response(
 
     def _consume_result(message, ack, nack):
         try:
+            msg_hash = hashlib.md5(message).hexdigest()
             payload = handler.deserialize_system_message(message)
 
             if isinstance(payload, dict) and payload.get("type") == "checkpoint":
                 client_id = payload.get("client_id")
                 chk_id = payload.get("checkpoint_id")
                 local_chk_key = (client_id, chk_id)
-                checkpoint_counts[local_chk_key] = checkpoint_counts.get(local_chk_key, 0) + 1
-                if checkpoint_counts[local_chk_key] >= n_upstream:
+                sender_id = payload.get("_worker_node_id") or f"unknown:{msg_hash}"
+
+                if local_chk_key in completed_checkpoints:
+                    ack()
+                    return
+
+                checkpoint_senders.setdefault(local_chk_key, set())
+                if sender_id in checkpoint_senders[local_chk_key]:
+                    ack()
+                    return
+
+                checkpoint_senders[local_chk_key].add(sender_id)
+                if len(checkpoint_senders[local_chk_key]) >= n_upstream:
                     with checkpoint_lock:
                         barrier_key = (client_id, chk_id)
                         
@@ -174,7 +182,8 @@ def handle_client_response(
                                 client_semaphores[client_id].release()
                             
                             del checkpoint_barriers[barrier_key]
-                    del checkpoint_counts[local_chk_key]
+                    del checkpoint_senders[local_chk_key]
+                    completed_checkpoints.add(local_chk_key)
 
                 ack()
                 return
@@ -182,15 +191,27 @@ def handle_client_response(
             if isinstance(payload, dict) and payload.get("type") == "eof":
                 rows = []
                 client_id = _extract_client_id(payload, rows, client_sockets)
+                sender_id = payload.get("_worker_node_id") or f"unknown:{msg_hash}"
                 
                 if client_id not in client_outboxes:
                     ack()
                     return
 
-                eof_count[client_id] = eof_count.get(client_id, 0) + 1
-                logging.info(f"Received EOF for query {query_id} from client {client_id} ({eof_count[client_id]}/{n_upstream})")
+                done_queries = client_query_eofs.get(client_id, [])
+                if query_id in done_queries:
+                    ack()
+                    return
 
-                if eof_count[client_id] >= n_upstream:
+                eof_senders.setdefault(client_id, set())
+                if sender_id in eof_senders[client_id]:
+                    ack()
+                    return
+
+                eof_senders[client_id].add(sender_id)
+                current_eof_count = len(eof_senders[client_id])
+                logging.info(f"Received EOF for query {query_id} from client {client_id} ({current_eof_count}/{n_upstream})")
+
+                if current_eof_count >= n_upstream:
                     _handle_query_eof(
                         client_id,
                         query_id,

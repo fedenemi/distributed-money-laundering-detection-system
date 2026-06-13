@@ -19,6 +19,30 @@ def _connection_parameters(host):
         blocked_connection_timeout=RABBITMQ_BLOCKED_CONNECTION_TIMEOUT,
     )
 
+
+def _ack_nack_once(ch, delivery_tag):
+    settled = {"done": False}
+
+    def ack():
+        if settled["done"]:
+            return
+        settled["done"] = True
+        try:
+            ch.basic_ack(delivery_tag=delivery_tag)
+        except Exception:
+            pass
+
+    def nack():
+        if settled["done"]:
+            return
+        settled["done"] = True
+        try:
+            ch.basic_nack(delivery_tag=delivery_tag)
+        except Exception:
+            pass
+
+    return ack, nack
+
 class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
 
     def __init__(self, host, queue_name):
@@ -36,16 +60,7 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
     
     def start_consuming(self, on_message_callback):
         def callback_wrapper(ch, method, properties, body):
-            def ack():
-                try:
-                    ch.basic_ack(delivery_tag=method.delivery_tag)
-                except Exception:
-                    pass
-            def nack():
-                try:
-                    ch.basic_nack(delivery_tag=method.delivery_tag)
-                except Exception:
-                    pass
+            ack, nack = _ack_nack_once(ch, method.delivery_tag)
             on_message_callback(body, ack, nack)
         try:
             self.channel.basic_qos(prefetch_count=QUEUE_PREFETCH_COUNT)
@@ -127,16 +142,7 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
     
     def start_consuming(self, on_message_callback):
         def callback_wrapper(ch, method, properties, body):
-            def ack():
-                try:
-                    ch.basic_ack(delivery_tag=method.delivery_tag)
-                except Exception:
-                    pass
-            def nack():
-                try:
-                    ch.basic_nack(delivery_tag=method.delivery_tag)
-                except Exception:
-                    pass
+            ack, nack = _ack_nack_once(ch, method.delivery_tag)
             on_message_callback(body, ack, nack)
         
         try:

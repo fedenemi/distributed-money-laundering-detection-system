@@ -76,6 +76,7 @@ def generate_system_docker_compose(total_clients=0):
 
         gateway["gateway"]["environment"].append(f"OUTPUT_SHARDS={usd_instances}")
         gateway["gateway"]["environment"].append(f"BANK_OUTPUT_SHARDS={q2_bank_names_adder_instances}")
+        gateway["gateway"]["environment"].append(f"BANKS_OUTPUT_SHARDS={q2_bank_names_adder_instances}")
         gateway["gateway"]["environment"].append(f"QUERY_1_N_UPSTREAM={filter_instances}")
         gateway["gateway"]["environment"].append(f"QUERY_2_N_UPSTREAM={q2_aggregator_instances}")
         gateway["gateway"]["environment"].append(f"QUERY_3_N_UPSTREAM={q3_avg_and_transactions_joiner_instances}")
@@ -166,6 +167,7 @@ def generate_system_docker_compose(total_clients=0):
         for name, config in q2_aggregators.items():
             config["environment"].append("BATCH_SIZE=2000")
             config["environment"].append(f"OUTPUT_SHARDS={q2_bank_names_adder_instances}")
+            config["environment"].append("ROUTING_FIELD=From Bank")
         system = system | q2_aggregators
 
         q2_bank_names_adders = get_bank_name_adders_services(
@@ -455,18 +457,19 @@ def generate_system_docker_compose(total_clients=0):
         system = system | q5_totals_sumers
 
         # --- MONITOR Y CHAOS MONKEY ---
-        worker_names = [name for name in system.keys() if name != "rabbitmq"]
+        worker_names = [name for name in system.keys() if name not in ["rabbitmq","gateway"]]
         system = system | _get_monitor_services(worker_names)
         system = system | _get_chaos_monkey_service()
 
     return system
 
 def _get_monitor_services(worker_names):
-    workers_value = ",".join(worker_names)
+    workers_value = ",".join(name for name in worker_names if name.lower() not in ["rabbitmq","gateway"])
     return {
         "monitor_0": {
             "build": {"context": "./src/monitor"},
             "depends_on": {"rabbitmq": {"condition": "service_healthy"}},
+            "restart": "unless-stopped",
             "environment": [
                 "MONITOR_ID=0",
                 "SUCCESSORS=monitor_1,monitor_2",
@@ -482,6 +485,7 @@ def _get_monitor_services(worker_names):
         "monitor_1": {
             "build": {"context": "./src/monitor"},
             "depends_on": {"rabbitmq": {"condition": "service_healthy"}},
+            "restart": "unless-stopped",
             "environment": [
                 "MONITOR_ID=1",
                 "SUCCESSORS=monitor_2,monitor_0",
@@ -497,6 +501,7 @@ def _get_monitor_services(worker_names):
         "monitor_2": {
             "build": {"context": "./src/monitor"},
             "depends_on": {"rabbitmq": {"condition": "service_healthy"}},
+            "restart": "unless-stopped",
             "environment": [
                 "MONITOR_ID=2",
                 "SUCCESSORS=monitor_0,monitor_1",

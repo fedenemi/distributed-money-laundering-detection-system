@@ -6,7 +6,7 @@ compose_file: docker-compose.yaml
 # - stop: docker compose stop <servicio>
 # - stop_start: docker compose stop <servicio>, espera downtime_seconds, docker compose start <servicio>
 # - kill_start: docker compose kill -s SIGKILL <servicio>, espera downtime_seconds, docker compose start <servicio>
-action: stop_start
+action: stop #_start
 
 initial_delay_seconds: 20
 interval_seconds: [30, 90]

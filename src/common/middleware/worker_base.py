@@ -272,12 +272,12 @@ class WorkerBase(HealthCheckServer):
 
     def run(self):
         logger.info(f"{self.__class__.__name__} iniciando")
-        eof_count = [0]
-        eof_per_client = {}
+        eof_global_senders = set()
+        eof_client_senders = {}
         done_clients = set()
-        checkpoint_counts = {}
-        
-        # Diccionarios para guardar las funciones ACK hasta cumplir la condición
+        checkpoint_senders = {}
+        completed_checkpoints = set()
+
         checkpoint_acks = {}
         eof_acks_per_client = {}
 
@@ -296,37 +296,48 @@ class WorkerBase(HealthCheckServer):
                     client_id = msg.get("client_id")
                     checkpoint_id = msg.get("checkpoint_id")
                     chk_key = (client_id, checkpoint_id)
-                    
-                    checkpoint_acks.setdefault(chk_key, []).append(ack) # Diferir ACK
-                    checkpoint_counts[chk_key] = checkpoint_counts.get(chk_key, 0) + 1
-                    
-                    if checkpoint_counts[chk_key] >= self.n_upstream:
+                    sender_id = msg.get("_worker_node_id") or f"unknown:{msg_hash}"
+
+                    if chk_key in completed_checkpoints:
+                        ack()
+                        return
+
+                    checkpoint_senders.setdefault(chk_key, set())
+                    if sender_id in checkpoint_senders[chk_key]:
+                        logger.warning(f"CHECKPOINT DUPLICADO IGNORADO de {sender_id}. Haciendo ack silencioso.")
+                        ack()
+                        return
+
+                    checkpoint_senders[chk_key].add(sender_id)
+                    checkpoint_acks.setdefault(chk_key, []).append(ack)
+
+                    if len(checkpoint_senders[chk_key]) >= self.n_upstream:
                         self._flush_all()
                         self._send_checkpoint(client_id, checkpoint_id)
-                        
-                        # Confirmar todos los ACKs juntos
+
                         for pending_ack in checkpoint_acks[chk_key]:
                             pending_ack()
                         del checkpoint_acks[chk_key]
-                        del checkpoint_counts[chk_key]
+                        del checkpoint_senders[chk_key]
+                        completed_checkpoints.add(chk_key)
                     return
                 
-                elif msg.get("type") == "cleanup":
-                    client_id = msg.get("client_id")
-                    self._buffer.pop(f"client:{client_id}", None)
-                    if hasattr(self, "_state"):
-                        self._state.pop(client_id, None)
-                    ack()
-                    return
                     
                 elif msg.get("type") == "eof":
                     t0_eof = time.perf_counter()
                     client_id = msg.get("client_id")
+                    sender_id = msg.get("_worker_node_id") or f"unknown:{msg_hash}"
+
                     if client_id is None:
-                        eof_count[0] += 1
-                        logger.info(f"{self.__class__.__name__} EOF recibido ({eof_count[0]}/{self.n_upstream})")
+                        if sender_id in eof_global_senders:
+                            ack()
+                            return
+
+                        eof_global_senders.add(sender_id)
+                        current_eof_count = len(eof_global_senders)
+                        logger.info(f"{self.__class__.__name__} EOF recibido ({current_eof_count}/{self.n_upstream})")
                         ack()
-                        if eof_count[0] >= self.n_upstream:
+                        if current_eof_count >= self.n_upstream:
                             for result in self.on_eof(None):
                                 self._emit([result])
                             self._flush_all()
@@ -335,11 +346,21 @@ class WorkerBase(HealthCheckServer):
                             logger.info(f"{self.__class__.__name__} terminado")
                         return
 
-                    eof_acks_per_client.setdefault(client_id, []).append(ack) # Diferir ACK
-                    eof_per_client[client_id] = eof_per_client.get(client_id, 0) + 1
-                    logger.info(f"{self.__class__.__name__} EOF recibido para client_id={client_id} ({eof_per_client[client_id]}/{self.n_upstream})")
+                    if client_id in done_clients:
+                        ack()
+                        return
+
+                    eof_client_senders.setdefault(client_id, set())
+                    if sender_id in eof_client_senders[client_id]:
+                        ack()
+                        return
+
+                    eof_client_senders[client_id].add(sender_id)
+                    current_eof_count = len(eof_client_senders[client_id])
+                    eof_acks_per_client.setdefault(client_id, []).append(ack)
+                    logger.info(f"{self.__class__.__name__} EOF recibido para client_id={client_id} ({current_eof_count}/{self.n_upstream})")
                     
-                    if eof_per_client[client_id] >= self.n_upstream and client_id not in done_clients:
+                    if current_eof_count >= self.n_upstream:
                         t1 = time.perf_counter()
                         for i, result in enumerate(self.on_eof(client_id)):
                             self._emit([result])
@@ -353,14 +374,19 @@ class WorkerBase(HealthCheckServer):
                         self._send_eof(client_id)
                         t_eof_network = time.perf_counter() - t2
                         done_clients.add(client_id)
-                        logger.info(f"EOF Total: {(time.perf_counter() - t0_eof):.4f}s | Lógica: {t_eof_logic:.4f}s | Red: {t_eof_network:.4f}s")
-                        
-                        # Confirmar todos los ACKs juntos
+                        # Cleanup del cliente al terminar de procesar
+                        self._buffer.pop(f"client:{client_id}", None)
+                        if hasattr(self, "_state"):
+                            self._state.pop(client_id, None)
+                        # Confirmar ACKs
                         for pending_ack in eof_acks_per_client[client_id]:
                             pending_ack()
+                        logger.info(f"EOF Total: {(time.perf_counter() - t0_eof):.4f}s | Lógica: {t_eof_logic:.4f}s | Red: {t_eof_network:.4f}s")
+                        
                         eof_acks_per_client[client_id] = []
 
                     if self.total_clients > 0 and len(done_clients) >= self.total_clients:
+                        self._running = False
                         self._consumer.stop_consuming()
                         logger.info(f"{self.__class__.__name__} terminado")
                     return
@@ -419,4 +445,3 @@ class WorkerBase(HealthCheckServer):
             except Exception as e:
                 logger.error(f"Error inesperado en {self.__class__.__name__}: {e}")
                 break
-

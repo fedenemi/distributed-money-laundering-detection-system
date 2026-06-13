@@ -47,6 +47,8 @@ class WorkerBaseDoubleIO(HealthCheckServer):
 
         # Configuration
         self._operation_mode = os.environ["OP_MODE"]
+        self.main_eof_dest = os.environ.get("MAIN_EOF_DEST", "NONE")
+        self.sec_eof_dest = os.environ.get("SEC_EOF_DEST", "NONE")
         self._results_buffer_next_stage = []
         self._running = True
 
@@ -352,12 +354,28 @@ class WorkerBaseDoubleIO(HealthCheckServer):
             else:
                 self._sec_producer.send(eof_body)
 
+    def _sender_id(self, msg: dict, msg_hash: str) -> str:
+        return msg.get("_worker_node_id") or f"unknown:{msg_hash}"
+
+    def _sender_set(self, mapping, key) -> set:
+        value = mapping.get(key, set())
+        if isinstance(value, set):
+            return set(value)
+        if isinstance(value, (list, tuple)):
+            return set(value)
+        if value in (None, 0):
+            return set()
+        return {str(value)}
+
+    def _sender_count(self, mapping, key) -> int:
+        return len(self._sender_set(mapping, key))
+
     def _execute_eof_main_input(self, client_id=None):
         if self._operation_mode == "PIPELINE":
             if self.waits_for_both_pipeline_eofs():
                 self._execute_pipeline_both_eofs(client_id)
                 return
-            if self._clients_eof_main_input[client_id] >= self.main_n_upstream:
+            if self._sender_count(self._clients_eof_main_input, client_id) >= self.main_n_upstream:
                 for result in self.on_main_input_eof(client_id):
                     self._emit_results_main_stage(result)
                 self._flush_all_next_stage()
@@ -367,8 +385,8 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                 if self._clients_joined.get(client_id, False):
                     return
 
-                main_ready = self._clients_eof_main_input.get(client_id, 0) >= self.main_n_upstream
-                sec_ready = self._clients_eof_sec_input.get(client_id, 0) >= self.sec_n_upstream
+                main_ready = self._sender_count(self._clients_eof_main_input, client_id) >= self.main_n_upstream
+                sec_ready = self._sender_count(self._clients_eof_sec_input, client_id) >= self.sec_n_upstream
                 
                 # NUEVO: Vaciar el buffer del proceso main incondicionalmente
                 if main_ready:
@@ -388,7 +406,7 @@ class WorkerBaseDoubleIO(HealthCheckServer):
             if self.waits_for_both_pipeline_eofs():
                 self._execute_pipeline_both_eofs(client_id)
                 return
-            if self._clients_eof_sec_input[client_id] >= self.sec_n_upstream:
+            if self._sender_count(self._clients_eof_sec_input, client_id) >= self.sec_n_upstream:
                 for result in self.on_secondary_input_eof(client_id):
                     self._emit_sec_output([result])
                 self._flush_all_sec_buffer()
@@ -398,8 +416,8 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                 if self._clients_joined.get(client_id, False):
                     return
                 
-                main_ready = self._clients_eof_main_input.get(client_id, 0) >= self.main_n_upstream
-                sec_ready = self._clients_eof_sec_input.get(client_id, 0) >= self.sec_n_upstream
+                main_ready = self._sender_count(self._clients_eof_main_input, client_id) >= self.main_n_upstream
+                sec_ready = self._sender_count(self._clients_eof_sec_input, client_id) >= self.sec_n_upstream
                 
                 if sec_ready and not self._clients_secondary_ready.get(client_id, False):
                     self._clients_secondary_ready[client_id] = True
@@ -422,8 +440,8 @@ class WorkerBaseDoubleIO(HealthCheckServer):
             if self._clients_joined.get(client_id, False):
                 return
 
-            main_ready = self._clients_eof_main_input.get(client_id, 0) >= self.main_n_upstream
-            sec_ready = self._clients_eof_sec_input.get(client_id, 0) >= self.sec_n_upstream
+            main_ready = self._sender_count(self._clients_eof_main_input, client_id) >= self.main_n_upstream
+            sec_ready = self._sender_count(self._clients_eof_sec_input, client_id) >= self.sec_n_upstream
             if not main_ready or not sec_ready:
                 return
 
@@ -444,9 +462,10 @@ class WorkerBaseDoubleIO(HealthCheckServer):
     # --- Loop principal ---------------------------------------------------------
 
     def handle_message_main_input(self):
-        eof_count = [0]
+        eof_global_senders = set()
         chk_acks = {}
         client_eof_acks = {}
+        completed_checkpoints = set()
 
         def on_message(body: bytes, ack, nack):
             try:
@@ -464,22 +483,35 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                     client_id = msg.get("client_id")
                     chk_id = msg.get("checkpoint_id")
                     chk_key = f"{client_id}_{chk_id}"
+                    sender_id = self._sender_id(msg, msg_hash)
+
+                    if chk_key in completed_checkpoints:
+                        ack()
+                        return
   
                     with self._eof_lock:
-                        self._checkpoints_main[chk_key] = self._checkpoints_main.get(chk_key, 0) + 1
+                        senders = self._sender_set(self._checkpoints_main, chk_key)
+                        if sender_id in senders:
+                            logger.warning(f"CHECKPOINT MAIN DUPLICADO IGNORADO de {sender_id}. Haciendo ack silencioso.")
+                            ack()
+                            return
+
+                        senders.add(sender_id)
+                        self._checkpoints_main[chk_key] = senders
                         
                         if self._operation_mode == "PIPELINE":
                             chk_acks.setdefault(chk_key, []).append(ack)
-                            if self._checkpoints_main[chk_key] >= self.main_n_upstream:
+                            if len(senders) >= self.main_n_upstream:
                                 self._flush_all_main_buffer()
                                 self._send_main_checkpoint(client_id, chk_id)
                                 for a in chk_acks[chk_key]: a()
                                 del chk_acks[chk_key]
                                 del self._checkpoints_main[chk_key]
+                                completed_checkpoints.add(chk_key)
                         else: # JOINER
                             ack()
-                            main_count = self._checkpoints_main[chk_key]
-                            sec_count = self._checkpoints_sec.get(chk_key, 0)
+                            main_count = len(senders)
+                            sec_count = self._sender_count(self._checkpoints_sec, chk_key)
 
                             # NUEVO: Obligar al proceso main a liberar mensajes atrapados
                             if main_count == self.main_n_upstream:
@@ -493,26 +525,43 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                                     del self._checkpoints_sec[chk_key]
                                 except KeyError:
                                     pass
+                                completed_checkpoints.add(chk_key)
                     return
                 elif msg.get("type") == "eof":
                     client_id = msg.get("client_id")
+                    sender_id = self._sender_id(msg, msg_hash)
                     if client_id is None:
-                        eof_count[0] += 1
-                        logger.info(f"{self.__class__.__name__} EOF main recibido ({eof_count[0]}/{self.main_n_upstream})")
+                        if sender_id in eof_global_senders:
+                            ack()
+                            return
+
+                        eof_global_senders.add(sender_id)
+                        current_eof_count = len(eof_global_senders)
+                        logger.info(f"{self.__class__.__name__} EOF main recibido ({current_eof_count}/{self.main_n_upstream})")
                         ack()
-                        if eof_count[0] >= self.main_n_upstream:
+                        if current_eof_count >= self.main_n_upstream:
                             self._execute_eof_main_input(None)
                             self._main_consumer.stop_consuming()
                             logger.info(f"{self.__class__.__name__} terminado")
                         return
 
-                    self._clients_eof_main_input[client_id] = self._clients_eof_main_input.get(client_id, 0) + 1
-                    logger.info(f"{self.__class__.__name__} EOF main recibido para client_id={client_id} ({self._clients_eof_main_input[client_id]}/{self.main_n_upstream})")
+                    if self._clients_joined.get(client_id, False):
+                        ack()
+                        return
+
+                    senders = self._sender_set(self._clients_eof_main_input, client_id)
+                    if sender_id in senders:
+                        ack()
+                        return
+                    senders.add(sender_id)
+                    self._clients_eof_main_input[client_id] = senders
+                    current_eof_count = len(senders)
+                    logger.info(f"{self.__class__.__name__} EOF main recibido para client_id={client_id} ({current_eof_count}/{self.main_n_upstream})")
                     
                     if self._operation_mode == "PIPELINE":
                         client_eof_acks.setdefault(client_id, []).append(ack)
                         self._execute_eof_main_input(client_id)
-                        if self._clients_eof_main_input[client_id] >= self.main_n_upstream:
+                        if current_eof_count >= self.main_n_upstream:
                             for a in client_eof_acks[client_id]: a()
                             client_eof_acks[client_id] = []
                     else:
@@ -580,9 +629,10 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                 break
 
     def handle_message_sec_input(self):
-        eof_count = [0]
+        eof_global_senders = set()
         chk_acks = {}
         client_eof_acks = {}
+        completed_checkpoints = set()
 
         def on_message(body: bytes, ack, nack):
             try:
@@ -599,22 +649,35 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                     client_id = msg.get("client_id")
                     chk_id = msg.get("checkpoint_id")
                     chk_key = f"{client_id}_{chk_id}"
+                    sender_id = self._sender_id(msg, msg_hash)
+
+                    if chk_key in completed_checkpoints:
+                        ack()
+                        return
                     
                     with self._eof_lock:
-                        self._checkpoints_sec[chk_key] = self._checkpoints_sec.get(chk_key, 0) + 1
+                        senders = self._sender_set(self._checkpoints_sec, chk_key)
+                        if sender_id in senders:
+                            logger.warning(f"CHECKPOINT SEC DUPLICADO IGNORADO de {sender_id}. Haciendo ack silencioso.")
+                            ack()
+                            return
+
+                        senders.add(sender_id)
+                        self._checkpoints_sec[chk_key] = senders
                         
                         if self._operation_mode == "PIPELINE":
                             chk_acks.setdefault(chk_key, []).append(ack)
-                            if self._checkpoints_sec[chk_key] >= self.sec_n_upstream:
+                            if len(senders) >= self.sec_n_upstream:
                                 self._flush_all_sec_buffer()
                                 self._send_sec_checkpoint(client_id, chk_id)
                                 for a in chk_acks[chk_key]: a()
                                 del chk_acks[chk_key]
                                 del self._checkpoints_sec[chk_key]
+                                completed_checkpoints.add(chk_key)
                         else: # JOINER
                             ack()
-                            main_count = self._checkpoints_main.get(chk_key, 0)
-                            sec_count = self._checkpoints_sec[chk_key]
+                            main_count = self._sender_count(self._checkpoints_main, chk_key)
+                            sec_count = len(senders)
                             
                             # Obliga al proceso secundario a liberar mensajes
                             if sec_count == self.sec_n_upstream:
@@ -628,26 +691,43 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                                     del self._checkpoints_sec[chk_key]
                                 except KeyError:
                                     pass
+                                completed_checkpoints.add(chk_key)
                     return
                 elif msg.get("type") == "eof":
                     client_id = msg.get("client_id")
+                    sender_id = self._sender_id(msg, msg_hash)
                     if client_id is None:
-                        eof_count[0] += 1
-                        logger.info(f"{self.__class__.__name__} EOF secondary recibido ({eof_count[0]}/{self.sec_n_upstream})")
+                        if sender_id in eof_global_senders:
+                            ack()
+                            return
+
+                        eof_global_senders.add(sender_id)
+                        current_eof_count = len(eof_global_senders)
+                        logger.info(f"{self.__class__.__name__} EOF secondary recibido ({current_eof_count}/{self.sec_n_upstream})")
                         ack()
-                        if eof_count[0] >= self.sec_n_upstream:
+                        if current_eof_count >= self.sec_n_upstream:
                             self._execute_eof_sec_input(None)
                             self._sec_consumer.stop_consuming()
                             logger.info(f"{self.__class__.__name__} terminado")
                         return
 
-                    self._clients_eof_sec_input[client_id] = self._clients_eof_sec_input.get(client_id, 0) + 1
-                    logger.info(f"{self.__class__.__name__} EOF secondary recibido para client_id={client_id} ({self._clients_eof_sec_input[client_id]}/{self.sec_n_upstream})")
+                    if self._clients_joined.get(client_id, False):
+                        ack()
+                        return
+
+                    senders = self._sender_set(self._clients_eof_sec_input, client_id)
+                    if sender_id in senders:
+                        ack()
+                        return
+                    senders.add(sender_id)
+                    self._clients_eof_sec_input[client_id] = senders
+                    current_eof_count = len(senders)
+                    logger.info(f"{self.__class__.__name__} EOF secondary recibido para client_id={client_id} ({current_eof_count}/{self.sec_n_upstream})")
                     
                     if self._operation_mode == "PIPELINE":
                         client_eof_acks.setdefault(client_id, []).append(ack)
                         self._execute_eof_sec_input(client_id)
-                        if self._clients_eof_sec_input[client_id] >= self.sec_n_upstream:
+                        if current_eof_count >= self.sec_n_upstream:
                             for a in client_eof_acks[client_id]: a()
                             client_eof_acks[client_id] = []
                     else:
@@ -770,6 +850,8 @@ class WorkerBaseDoubleIO(HealthCheckServer):
         self.sec_output_exchange = os.environ.get("SECONDARY_OUTPUT_EXCHANGE", "")
         self.sec_output_shards   = int(os.environ.get("SEC_OUTPUT_SHARDS", os.environ.get("SECONDARY_OUTPUT_SHARDS", "1")))
         self._sec_out_buffer: dict = {}
+        self.main_eof_dest = os.environ.get("MAIN_EOF_DEST", "NONE")
+        self.sec_eof_dest = os.environ.get("SEC_EOF_DEST", "NONE")
 
         self._main_consumer = self._create_main_consumer()
 
@@ -837,6 +919,8 @@ class WorkerBaseDoubleIO(HealthCheckServer):
         self.sec_output_exchange = os.environ.get("SECONDARY_OUTPUT_EXCHANGE", "")
         self.sec_output_shards   = int(os.environ.get("SEC_OUTPUT_SHARDS", os.environ.get("SECONDARY_OUTPUT_SHARDS", "1")))
         self._sec_out_buffer: dict = {}
+        self.main_eof_dest = os.environ.get("MAIN_EOF_DEST", "NONE")
+        self.sec_eof_dest = os.environ.get("SEC_EOF_DEST", "NONE")
 
         self._sec_consumer = self._create_sec_consumer()
 
