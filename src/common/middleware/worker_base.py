@@ -57,7 +57,12 @@ class WorkerBase(HealthCheckServer):
         self._buffer: dict = {}
         self._running = True
 
-        logger_path = f"/tmp/worker_log_{self.consumer_group}_{self.shard_id}"
+        base_logs_dir = "/worker_logs"
+        worker_name = f"{self.consumer_group}_{self.shard_id}"
+        worker_dir = os.path.join(base_logs_dir, worker_name)
+        os.makedirs(worker_dir, exist_ok=True)
+        logger_path = os.path.join(worker_dir, "data")
+
         self.node_logger = BaseNodeLogger(logger_path)
 
         (self.pending_batch_id, 

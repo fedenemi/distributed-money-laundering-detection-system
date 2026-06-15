@@ -12,3 +12,5 @@ environment:
 - MOM_HOST=rabbitmq
 - PYTHONUNBUFFERED=1
 - BATCH_SIZE=1
+volumes:
+- ./worker_logs:/worker_logs

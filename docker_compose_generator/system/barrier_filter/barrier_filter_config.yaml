@@ -10,3 +10,5 @@ environment:
 - PYTHONUNBUFFERED=1
 - OP_MODE=JOINER
 - COEF=0.01
+volumes:
+- ./worker_logs:/worker_logs

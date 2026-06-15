@@ -921,9 +921,15 @@ class WorkerBaseDoubleIO(HealthCheckServer):
             self._sec_producer = None
 
         # Logging
-        logger_path = f"/tmp/worker_log_{self.consumer_group}_{self.shard_id}_main"
+        base_logs_dir = "/worker_logs"
+        worker_name = f"{self.consumer_group}_{self.shard_id}"
+        worker_dir = os.path.join(base_logs_dir, worker_name)
+        os.makedirs(worker_dir, exist_ok=True)
+        logger_path = os.path.join(worker_dir, "main")
+
         self.node_logger = BaseNodeLogger(logger_path)
 
+        # Recover state
         self.pending_batch_id, self.processed_tx_count, self.last_completed_batch = self.node_logger.recover_batch_state()
 
         recovered_buffers = self.node_logger.load_all_buffers()
@@ -1009,9 +1015,15 @@ class WorkerBaseDoubleIO(HealthCheckServer):
             self._sec_producer = None
 
         # Logging
-        logger_path = f"/tmp/worker_log_{self.consumer_group}_{self.shard_id}_sec"
+        base_logs_dir = "/worker_logs"
+        worker_name = f"{self.consumer_group}_{self.shard_id}"
+        worker_dir = os.path.join(base_logs_dir, worker_name)
+        os.makedirs(worker_dir, exist_ok=True)
+        logger_path = os.path.join(worker_dir, "sec")
+
         self.node_logger = BaseNodeLogger(logger_path)
 
+        # Recover state
         self.pending_batch_id, self.processed_tx_count, self.last_completed_batch = self.node_logger.recover_batch_state()
 
         recovered_buffers = self.node_logger.load_all_buffers()

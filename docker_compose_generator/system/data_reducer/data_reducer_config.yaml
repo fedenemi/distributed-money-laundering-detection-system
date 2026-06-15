@@ -6,3 +6,5 @@ depends_on:
     condition: service_healthy
 environment:
 - RABBITMQ_HOST=rabbitmq
+volumes:
+- ./worker_logs:/worker_logs
