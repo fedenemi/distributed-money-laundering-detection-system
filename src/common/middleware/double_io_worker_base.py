@@ -36,6 +36,7 @@ import multiprocessing
 import hashlib
 import random
 
+from common.logger.base_node_logger import BaseNodeLogger
 from common.middleware.middleware_rabbitmq import MessageMiddlewareQueueRabbitMQ, _connection_parameters
 from common.middleware.middleware_sharded import ShardedExchangeConsumer, ShardedExchangeProducer
 from common.middleware.middleware import MessageMiddlewareDisconnectedError, MessageMiddlewareMessageError
@@ -112,6 +113,8 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                 self._main_producer.close()
         except Exception:
             pass
+        if hasattr(self, "node_logger") and self.node_logger is not None:
+            self.node_logger.close()
 
     def _close_sec_resources(self):
         try:
@@ -125,6 +128,8 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                 self._sec_producer.close()
         except Exception:
             pass
+        if hasattr(self, "node_logger") and self.node_logger is not None:
+            self.node_logger.close()
 
     def _producer_is_open(self, producer):
         if producer is None:
@@ -223,6 +228,22 @@ class WorkerBaseDoubleIO(HealthCheckServer):
 
     # --- Emisión con Buffer y flush --------------------------------------------------------
 
+    def _sender_id(self, msg: dict, msg_hash: str) -> str:
+        return msg.get("_worker_node_id") or f"unknown:{msg_hash}"
+
+    def _sender_set(self, mapping, key) -> set:
+        value = mapping.get(key, set())
+        if isinstance(value, set):
+            return set(value)
+        if isinstance(value, (list, tuple)):
+            return set(value)
+        if value in (None, 0):
+            return set()
+        return {str(value)}
+
+    def _sender_count(self, mapping, key) -> int:
+        return len(self._sender_set(mapping, key))
+
     def _emit_results_main_stage(self, results: tuple[list, list]):
         self._emit_main_output(results[0])
         self._emit_sec_output(results[1])
@@ -231,25 +252,38 @@ class WorkerBaseDoubleIO(HealthCheckServer):
         if not results or self._main_producer is None:
             return
         for msg in results:
-            buf_key = self._buffer_key(msg, self.main_output_exchange, self.main_output_shards)
-            self._main_out_buffer.setdefault(buf_key, []).append(msg)
-            if len(self._main_out_buffer[buf_key]) >= self.batch_size:
-                self._flush_main_buffer_key(buf_key)
+            real_key = self._buffer_key(msg, self.main_output_exchange, self.main_output_shards)
+            buf_key_logger = f"out_main_{real_key}"
+            client_id = msg.get("client_id")
+            
+            self._main_out_buffer.setdefault(real_key, []).append(msg)
+            self.node_logger.append_to_buffer(client_id, buf_key_logger, msg)
+            
+            if len(self._main_out_buffer[real_key]) >= self.batch_size:
+                self._flush_main_buffer_key(real_key)
 
     def _emit_sec_output(self, results: list):
         if not results or self._sec_producer is None:
             return
         for msg in results:
-            buf_key = self._buffer_key(msg, self.sec_output_exchange, self.sec_output_shards)
-            self._sec_out_buffer.setdefault(buf_key, []).append(msg)
-            if len(self._sec_out_buffer[buf_key]) >= self.sec_batch_size:
-                self._flush_sec_buffer_key(buf_key)
+            real_key = self._buffer_key(msg, self.sec_output_exchange, self.sec_output_shards)
+            buf_key_logger = f"out_sec_{real_key}"
+            client_id = msg.get("client_id")
+            
+            self._sec_out_buffer.setdefault(real_key, []).append(msg)
+            self.node_logger.append_to_buffer(client_id, buf_key_logger, msg)
+            
+            if len(self._sec_out_buffer[real_key]) >= self.sec_batch_size:
+                self._flush_sec_buffer_key(real_key)
 
     def _flush_main_buffer_key(self, buf_key: str):
         rows = self._main_out_buffer.pop(buf_key, [])
         if not rows:
             return
-        body = serialize({"rows": rows})
+        body = serialize({
+            "rows": rows, 
+            "_worker_node_id": f"{self.consumer_group}_{self.shard_id}_main"
+        })
         self._ensure_main_producer()
         try:
             if self.main_output_exchange and self.main_output_shards > 1:
@@ -263,11 +297,19 @@ class WorkerBaseDoubleIO(HealthCheckServer):
             else:
                 self._main_producer.send(body)
 
+        clients_in_batch = {row.get("client_id") for row in rows}
+        for cid in clients_in_batch:
+            if hasattr(self, "node_logger"):
+                self.node_logger.clear_buffer(cid, f"out_main_{buf_key}")
+
     def _flush_sec_buffer_key(self, buf_key: str):
         rows = self._sec_out_buffer.pop(buf_key, [])
         if not rows:
             return
-        body = serialize({"rows": rows})
+        body = serialize({
+            "rows": rows, 
+            "_worker_node_id": f"{self.consumer_group}_{self.shard_id}_sec"
+        })
         self._ensure_sec_producer()
         try:
             if self.sec_output_exchange and self.sec_output_shards > 1:
@@ -280,6 +322,11 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                 self._sec_producer.send_to_shard(body, int(buf_key))
             else:
                 self._sec_producer.send(body)
+
+        clients_in_batch = {row.get("client_id") for row in rows}
+        for cid in clients_in_batch:
+            if hasattr(self, "node_logger"):
+                self.node_logger.clear_buffer(cid, f"out_sec_{buf_key}")
 
     def _flush_all_main_buffer(self):
         for key in list(self._main_out_buffer.keys()):
@@ -296,7 +343,12 @@ class WorkerBaseDoubleIO(HealthCheckServer):
     def _send_main_checkpoint(self, client_id, checkpoint_id):
         if self._main_producer is None:
             return
-        chk_msg = {"type": "checkpoint", "client_id": client_id, "checkpoint_id": checkpoint_id}
+        chk_msg = {
+            "type": "checkpoint", 
+            "client_id": client_id, 
+            "checkpoint_id": checkpoint_id,
+            "_worker_node_id": f"{self.consumer_group}_{self.shard_id}_main"
+        }
         chk_body = serialize(chk_msg)
         self._ensure_main_producer()
         try:
@@ -314,7 +366,12 @@ class WorkerBaseDoubleIO(HealthCheckServer):
     def _send_sec_checkpoint(self, client_id, checkpoint_id):
         if self._sec_producer is None:
             return
-        chk_msg = {"type": "checkpoint", "client_id": client_id, "checkpoint_id": checkpoint_id}
+        chk_msg = {
+            "type": "checkpoint", 
+            "client_id": client_id, 
+            "checkpoint_id": checkpoint_id,
+            "_worker_node_id": f"{self.consumer_group}_{self.shard_id}_sec"
+        }
         chk_body = serialize(chk_msg)
         self._ensure_sec_producer()
         try:
@@ -332,7 +389,10 @@ class WorkerBaseDoubleIO(HealthCheckServer):
     def _send_main_output_eof(self, client_id=None):
         if self._main_producer is None:
             return
-        eof_msg = {"type": "eof"}
+        eof_msg = {
+            "type": "eof", 
+            "_worker_node_id": f"{self.consumer_group}_{self.shard_id}_main"
+        }
         if client_id is not None:
             eof_msg["client_id"] = client_id
         eof_body = serialize(eof_msg)
@@ -352,7 +412,10 @@ class WorkerBaseDoubleIO(HealthCheckServer):
     def _send_sec_output_eof(self, client_id=None):
         if self._sec_producer is None:
             return
-        eof_msg = {"type": "eof"}
+        eof_msg = {
+            "type": "eof", 
+            "_worker_node_id": f"{self.consumer_group}_{self.shard_id}_sec"
+        }
         if client_id is not None:
             eof_msg["client_id"] = client_id
         eof_body = serialize(eof_msg)
@@ -462,28 +525,55 @@ class WorkerBaseDoubleIO(HealthCheckServer):
 
     # --- Loop principal ---------------------------------------------------------
 
-    def handle_message_main_input(self):
-        eof_count = [0]
+    def handle_message_main_input(self, recovered_eof_global=None):
+        eof_global_senders = recovered_eof_global or set()
+        chk_acks = {}
+        client_eof_acks = {}
+        completed_checkpoints = set()
 
         def on_message(body: bytes, ack, nack):
             try:
+                msg_hash = hashlib.md5(body).hexdigest()
+                if msg_hash == self.last_completed_batch:
+                    logger.warning(f"DUPLICADO IGNORADO ({msg_hash}) en {self.__class__.__name__}. Haciendo ack silencioso.")
+                    ack()
+                    return
+                    
                 msg = deserialize(body)
+                
                 if msg.get("type") == "checkpoint":
                     client_id = msg.get("client_id")
                     chk_id = msg.get("checkpoint_id")
                     chk_key = f"{client_id}_{chk_id}"
-  
+                    sender_id = self._sender_id(msg, msg_hash)
+                    
+                    if chk_key in completed_checkpoints:
+                        ack()
+                        return
+
                     with self._eof_lock:
-                        self._checkpoints_main[chk_key] = self._checkpoints_main.get(chk_key, 0) + 1
+                        senders = self._sender_set(self._checkpoints_main, chk_key)
+                        if sender_id in senders:
+                            logger.warning(f"CHECKPOINT MAIN DUPLICADO IGNORADO de {sender_id}. Haciendo ack silencioso.")
+                            ack()
+                            return
+                            
+                        senders.add(sender_id)
+                        self._checkpoints_main[chk_key] = senders
                         
                         if self._operation_mode == "PIPELINE":
-                            if self._checkpoints_main[chk_key] >= self.main_n_upstream:
+                            chk_acks.setdefault(chk_key, []).append(ack)
+                            if len(senders) >= self.main_n_upstream:
                                 self._flush_all_main_buffer()
                                 self._send_main_checkpoint(client_id, chk_id)
+                                for a in chk_acks[chk_key]: a()
+                                del chk_acks[chk_key]
                                 del self._checkpoints_main[chk_key]
+                                completed_checkpoints.add(chk_key)
                         else: # JOINER
-                            main_count = self._checkpoints_main[chk_key]
-                            sec_count = self._checkpoints_sec.get(chk_key, 0)
+                            ack()
+                            main_count = len(senders)
+                            sec_count = self._sender_count(self._checkpoints_sec, chk_key)
 
                             if main_count >= self.main_n_upstream and sec_count >= self.sec_n_upstream:
                                 self._flush_all_main_buffer()
@@ -493,41 +583,87 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                                     del self._checkpoints_sec[chk_key]
                                 except KeyError:
                                     pass
-                    ack()
+                                completed_checkpoints.add(chk_key)
                     return
+                    
                 elif msg.get("type") == "eof":
                     client_id = msg.get("client_id")
+                    sender_id = self._sender_id(msg, msg_hash)
+                    
                     if client_id is None:
-                        eof_count[0] += 1
-                        logger.info(
-                            f"{self.__class__.__name__} EOF main recibido "
-                            f"({eof_count[0]}/{self.main_n_upstream})"
-                        )
+                        if sender_id in eof_global_senders:
+                            ack()
+                            return
+                            
+                        self.node_logger.log_eof(client_id, sender_id)
+                        eof_global_senders.add(sender_id)
+                        current_eof_count = len(eof_global_senders)
+                        
+                        logger.info(f"{self.__class__.__name__} EOF main recibido ({current_eof_count}/{self.main_n_upstream})")
                         ack()
-                        if eof_count[0] >= self.main_n_upstream:
+                        if current_eof_count >= self.main_n_upstream:
                             self._execute_eof_main_input(None)
                             self._main_consumer.stop_consuming()
                             logger.info(f"{self.__class__.__name__} terminado")
                         return
 
-                    self._clients_eof_main_input[client_id] = self._clients_eof_main_input.get(client_id, 0) + 1
-                    logger.info(
-                        f"{self.__class__.__name__} EOF main recibido para client_id={client_id} "
-                        f"({self._clients_eof_main_input[client_id]}/{self.main_n_upstream})"
-                    )
-                    self._execute_eof_main_input(client_id)
-                    ack()
+                    if self._clients_joined.get(client_id, False):
+                        ack()
+                        return
+
+                    senders = self._sender_set(self._clients_eof_main_input, client_id)
+                    if sender_id in senders:
+                        ack()
+                        return
+                        
+                    self.node_logger.log_eof(client_id, sender_id)
+                    senders.add(sender_id)
+                    self._clients_eof_main_input[client_id] = senders
+                    current_eof_count = len(senders)
+                    
+                    logger.info(f"{self.__class__.__name__} EOF main recibido para client_id={client_id} ({current_eof_count}/{self.main_n_upstream})")
+                    
+                    if self._operation_mode == "PIPELINE":
+                        client_eof_acks.setdefault(client_id, []).append(ack)
+                        self._execute_eof_main_input(client_id)
+                        if current_eof_count >= self.main_n_upstream:
+                            for a in client_eof_acks[client_id]: a()
+                            client_eof_acks[client_id] = []
+                    else:
+                        self._execute_eof_main_input(client_id)
+                        ack()
                     return
 
                 else:
-                    for row in msg.get("rows", []):
+                    is_resuming = (msg_hash == self.pending_batch_id)
+                    if not is_resuming:
+                        self.node_logger.save_batch_state(msg_hash, 0, self.last_completed_batch)
+                        self.pending_batch_id = msg_hash
+                        self.processed_tx_count = 0
+
+                    for i, row in enumerate(msg.get("rows", [])):
+                        if is_resuming and i < self.processed_tx_count:
+                            continue
+                            
                         if self._operation_mode == "PIPELINE":
                             self._emit_results_main_stage(self.process_main_input(row))
                         else:
                             results, _ = self.process_main_input(row)
                             self._emit_main_output(results)
+                            
+                        if i % 100 == 0 and i > 0:
+                            self.node_logger.save_batch_state(msg_hash, i, self.last_completed_batch)
+                            self._main_consumer.process_events()
+                            if self._main_producer:
+                                self._main_producer.process_events()
+
                     self.on_main_batch_complete()
+                    self.node_logger.save_batch_state(None, 0, msg_hash)
+                    self.pending_batch_id = None
+                    self.processed_tx_count = 0
+                    self.last_completed_batch = msg_hash
                     ack()
+                    
             except Exception as e:
                 logger.error(f"Error procesando mensaje: {e}")
                 nack()
@@ -550,28 +686,55 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                 if not self._running:
                     self._close_main_resources()
 
-    def handle_message_sec_input(self):
-        eof_count = [0]
+    def handle_message_sec_input(self, recovered_eof_global=None):
+        eof_global_senders = recovered_eof_global or set()
+        chk_acks = {}
+        client_eof_acks = {}
+        completed_checkpoints = set()
 
         def on_message(body: bytes, ack, nack):
             try:
+                msg_hash = hashlib.md5(body).hexdigest()
+                if msg_hash == self.last_completed_batch:
+                    logger.warning(f"DUPLICADO IGNORADO ({msg_hash}) en {self.__class__.__name__}. Haciendo ack silencioso.")
+                    ack()
+                    return
+                    
                 msg = deserialize(body)
+                
                 if msg.get("type") == "checkpoint":
                     client_id = msg.get("client_id")
                     chk_id = msg.get("checkpoint_id")
                     chk_key = f"{client_id}_{chk_id}"
+                    sender_id = self._sender_id(msg, msg_hash)
+
+                    if chk_key in completed_checkpoints:
+                        ack()
+                        return
                     
                     with self._eof_lock:
-                        self._checkpoints_sec[chk_key] = self._checkpoints_sec.get(chk_key, 0) + 1
+                        senders = self._sender_set(self._checkpoints_sec, chk_key)
+                        if sender_id in senders:
+                            logger.warning(f"CHECKPOINT SEC DUPLICADO IGNORADO de {sender_id}. Haciendo ack silencioso.")
+                            ack()
+                            return
+                            
+                        senders.add(sender_id)
+                        self._checkpoints_sec[chk_key] = senders
                         
                         if self._operation_mode == "PIPELINE":
-                            if self._checkpoints_sec[chk_key] >= self.sec_n_upstream:
+                            chk_acks.setdefault(chk_key, []).append(ack)
+                            if len(senders) >= self.sec_n_upstream:
                                 self._flush_all_sec_buffer()
                                 self._send_sec_checkpoint(client_id, chk_id)
+                                for a in chk_acks[chk_key]: a()
+                                del chk_acks[chk_key]
                                 del self._checkpoints_sec[chk_key]
+                                completed_checkpoints.add(chk_key)
                         else: # JOINER
-                            main_count = self._checkpoints_main.get(chk_key, 0)
-                            sec_count = self._checkpoints_sec[chk_key]
+                            ack()
+                            main_count = self._sender_count(self._checkpoints_main, chk_key)
+                            sec_count = len(senders)
                             
                             if main_count >= self.main_n_upstream and sec_count >= self.sec_n_upstream:
                                 self._flush_all_main_buffer()
@@ -581,41 +744,86 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                                     del self._checkpoints_sec[chk_key]
                                 except KeyError:
                                     pass
-                    ack()
+                                completed_checkpoints.add(chk_key)
                     return
+                    
                 elif msg.get("type") == "eof":
                     client_id = msg.get("client_id")
+                    sender_id = self._sender_id(msg, msg_hash)
+                    
                     if client_id is None:
-                        eof_count[0] += 1
-                        logger.info(
-                            f"{self.__class__.__name__} EOF secondary recibido "
-                            f"({eof_count[0]}/{self.sec_n_upstream})"
-                        )
+                        if sender_id in eof_global_senders:
+                            ack()
+                            return
+                            
+                        self.node_logger.log_eof(client_id, sender_id)
+                        eof_global_senders.add(sender_id)
+                        current_eof_count = len(eof_global_senders)
+                        
+                        logger.info(f"{self.__class__.__name__} EOF secondary recibido ({current_eof_count}/{self.sec_n_upstream})")
                         ack()
-                        if eof_count[0] >= self.sec_n_upstream:
+                        if current_eof_count >= self.sec_n_upstream:
                             self._execute_eof_sec_input(None)
                             self._sec_consumer.stop_consuming()
                             logger.info(f"{self.__class__.__name__} terminado")
                         return
 
-                    self._clients_eof_sec_input[client_id] = self._clients_eof_sec_input.get(client_id, 0) + 1
-                    logger.info(
-                        f"{self.__class__.__name__} EOF secondary recibido para client_id={client_id} "
-                        f"({self._clients_eof_sec_input[client_id]}/{self.sec_n_upstream})"
-                    )
-                    self._execute_eof_sec_input(client_id)
-                    ack()
+                    if self._clients_joined.get(client_id, False):
+                        ack()
+                        return
+
+                    senders = self._sender_set(self._clients_eof_sec_input, client_id)
+                    if sender_id in senders:
+                        ack()
+                        return
+                        
+                    self.node_logger.log_eof(client_id, sender_id)
+                    senders.add(sender_id)
+                    self._clients_eof_sec_input[client_id] = senders
+                    current_eof_count = len(senders)
+                    
+                    logger.info(f"{self.__class__.__name__} EOF secondary recibido para client_id={client_id} ({current_eof_count}/{self.sec_n_upstream})")
+                    
+                    if self._operation_mode == "PIPELINE":
+                        client_eof_acks.setdefault(client_id, []).append(ack)
+                        self._execute_eof_sec_input(client_id)
+                        if current_eof_count >= self.sec_n_upstream:
+                            for a in client_eof_acks[client_id]: a()
+                            client_eof_acks[client_id] = []
+                    else:
+                        self._execute_eof_sec_input(client_id)
+                        ack()
                     return
 
-
                 else:
-                    for row in msg.get("rows", []):
+                    is_resuming = (msg_hash == self.pending_batch_id)
+                    if not is_resuming:
+                        self.node_logger.save_batch_state(msg_hash, 0, self.last_completed_batch)
+                        self.pending_batch_id = msg_hash
+                        self.processed_tx_count = 0
+
+                    for i, row in enumerate(msg.get("rows", [])):
+                        if is_resuming and i < self.processed_tx_count:
+                            continue
+                            
                         if self._operation_mode == "PIPELINE":
                             self._emit_sec_output(self.process_secondary_input(row)[1])
                         else:
                             self.process_secondary_input(row)
+
+                        if i % 100 == 0 and i > 0:
+                            self.node_logger.save_batch_state(msg_hash, i, self.last_completed_batch)
+                            self._sec_consumer.process_events()
+                            if self._sec_producer:
+                                self._sec_producer.process_events()
+
                     self.on_sec_batch_complete()
+                    self.node_logger.save_batch_state(None, 0, msg_hash)
+                    self.pending_batch_id = None
+                    self.processed_tx_count = 0
+                    self.last_completed_batch = msg_hash
                     ack()
+                    
             except Exception as e:
                 logger.error(f"Error procesando mensaje: {e}")
                 nack()
@@ -670,7 +878,7 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                          checkpoints_sec,
                          ):
         logging.basicConfig(level=logging.INFO)
-        # Shared variables
+        
         self._clients_eof_main_input = clients_eof_main
         self._clients_eof_sec_input = clients_eof_sec
         self._clients_joined = clients_joined
@@ -703,7 +911,6 @@ class WorkerBaseDoubleIO(HealthCheckServer):
         # Main input
         self._main_consumer = self._create_main_consumer()
 
-        # Main output
         if self.main_output_exchange and self.main_output_shards > 1:
             self._main_producer = ShardedExchangeProducer(RABBITMQ_HOST, self.main_output_exchange, self.main_output_shards)
         elif self.main_output_queue:
@@ -719,11 +926,30 @@ class WorkerBaseDoubleIO(HealthCheckServer):
         else:
             self._sec_producer = None
 
-        # SIGTERM handler
-        signal.signal(signal.SIGTERM, self._handle_main_process_sigterm)
+        # Logging
+        logger_path = f"/tmp/worker_log_{self.consumer_group}_{self.shard_id}_main"
+        self.node_logger = BaseNodeLogger(logger_path)
 
-        # Handle inputs
-        self.handle_message_main_input()
+        self.pending_batch_id, self.processed_tx_count, self.last_completed_batch = self.node_logger.recover_batch_state()
+
+        recovered_buffers = self.node_logger.load_all_buffers()
+        for (client_id, raw_buf_key), msgs in recovered_buffers.items():
+            if raw_buf_key.startswith("out_main_"):
+                real_key = raw_buf_key.replace("out_main_", "")
+                self._main_out_buffer.setdefault(real_key, []).extend(msgs)
+            elif raw_buf_key.startswith("out_sec_"):
+                real_key = raw_buf_key.replace("out_sec_", "")
+                self._sec_out_buffer.setdefault(real_key, []).extend(msgs)
+
+        recovered_eof_global, eof_clients = self.node_logger.recover_eofs()
+        for cid, senders in eof_clients.items():
+            with self._eof_lock:
+                current = self._sender_set(self._clients_eof_main_input, cid)
+                current.update(senders)
+                self._clients_eof_main_input[cid] = current
+
+        signal.signal(signal.SIGTERM, self._handle_main_process_sigterm)
+        self.handle_message_main_input(recovered_eof_global)
 
     def run_sec_process(self,
                         clients_eof_main,
@@ -738,7 +964,7 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                         checkpoints_sec,
                         ):
         logging.basicConfig(level=logging.INFO)
-        # Shared variables
+        
         self._clients_eof_main_input = clients_eof_main
         self._clients_eof_sec_input = clients_eof_sec
         self._clients_joined = clients_joined
@@ -788,12 +1014,30 @@ class WorkerBaseDoubleIO(HealthCheckServer):
         else:
             self._sec_producer = None
 
-        # SIGTERM handler
+        # Logging
+        logger_path = f"/tmp/worker_log_{self.consumer_group}_{self.shard_id}_sec"
+        self.node_logger = BaseNodeLogger(logger_path)
+
+        self.pending_batch_id, self.processed_tx_count, self.last_completed_batch = self.node_logger.recover_batch_state()
+
+        recovered_buffers = self.node_logger.load_all_buffers()
+        for (client_id, raw_buf_key), msgs in recovered_buffers.items():
+            if raw_buf_key.startswith("out_main_"):
+                real_key = raw_buf_key.replace("out_main_", "")
+                self._main_out_buffer.setdefault(real_key, []).extend(msgs)
+            elif raw_buf_key.startswith("out_sec_"):
+                real_key = raw_buf_key.replace("out_sec_", "")
+                self._sec_out_buffer.setdefault(real_key, []).extend(msgs)
+
+        recovered_eof_global, eof_clients = self.node_logger.recover_eofs()
+        for cid, senders in eof_clients.items():
+            with self._eof_lock:
+                current = self._sender_set(self._clients_eof_sec_input, cid)
+                current.update(senders)
+                self._clients_eof_sec_input[cid] = current
+
         signal.signal(signal.SIGTERM, self._handle_sec_process_sigterm)
-
-        # Handle inputs
-        self.handle_message_sec_input()
-
+        self.handle_message_sec_input(recovered_eof_global)
 
     def run(self):
         logger.info(f"{self.__class__.__name__} iniciando")

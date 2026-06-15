@@ -1,22 +1,9 @@
 """
 WorkerBase: clase base para todos los workers.
 
-
 MessageMiddlewareQueueRabbitMQ: para colas simples
 ShardedExchangeConsumer: para consumir un shard de exchange
 ShardedExchangeProducer: para publicar con sharding
-
-Variables de entorno:
-  RABBITMQ_HOST: host de RabbitMQ (default: rabbitmq)
-  INPUT_QUEUE: cola de entrada (si consume de cola simple)
-  INPUT_EXCHANGE: exchange de entrada (si consume de shard)
-  CONSUMER_GROUP  : nombre logico de la etapa consumidora del exchange
-  SHARD_ID        : id del shard de este worker
-  N_UPSTREAM      : cantidad de EOFs a esperar
-  OUTPUT_QUEUE    : cola de salida simple
-  OUTPUT_EXCHANGE : exchange de salida con sharding
-  OUTPUT_SHARDS   : cantidad de shards de salida (default 1)
-  BATCH_SIZE      : filas por batch de salida (default 500)
 """
 import logging
 import os
@@ -24,7 +11,9 @@ import random
 import signal
 import time
 import zlib
+import hashlib
 
+from common.logger.base_node_logger import BaseNodeLogger
 from common.middleware.middleware_rabbitmq import MessageMiddlewareQueueRabbitMQ, _connection_parameters
 from common.middleware.middleware_sharded import ShardedExchangeConsumer, ShardedExchangeProducer
 from common.middleware.middleware import MessageMiddlewareDisconnectedError, MessageMiddlewareMessageError
@@ -53,6 +42,7 @@ def _wait_for_rabbitmq():
 class WorkerBase(HealthCheckServer):
 
     def __init__(self):
+        super().__init__()
         self.input_queue     = os.environ.get("INPUT_QUEUE", "")
         self.input_exchange  = os.environ.get("INPUT_EXCHANGE", "")
         self.consumer_group  = os.environ.get("CONSUMER_GROUP", self.__class__.__name__)
@@ -66,6 +56,19 @@ class WorkerBase(HealthCheckServer):
 
         self._buffer: dict = {}
         self._running = True
+
+        logger_path = f"/tmp/worker_log_{self.consumer_group}_{self.shard_id}"
+        self.node_logger = BaseNodeLogger(logger_path)
+
+        (self.pending_batch_id, 
+         self.processed_tx_count, 
+         self.last_completed_batch) = self.node_logger.recover_batch_state()
+
+        recovered_buffers = self.node_logger.load_all_buffers()
+        for (client_id, buf_key), msgs in recovered_buffers.items():
+            self._buffer.setdefault(buf_key, []).extend(msgs)
+
+        self.eof_global_senders, self.eof_client_senders = self.node_logger.recover_eofs()
 
         signal.signal(signal.SIGTERM, self._handle_sigterm)
 
@@ -104,6 +107,8 @@ class WorkerBase(HealthCheckServer):
                 self._producer.close()
         except Exception:
             pass
+        if hasattr(self, "node_logger") and self.node_logger is not None:
+            self.node_logger.close()
 
     def _reconnect_backoff(self, attempt: int):
         delay = min(RECONNECT_DELAY * (2 ** attempt), RECONNECT_MAX_DELAY)
@@ -125,7 +130,6 @@ class WorkerBase(HealthCheckServer):
 
     def on_eof(self, client_id=None) -> list:
         return []
-
 
     def _routing_key(self, msg: dict) -> str:
         if self.output_exchange and self.output_shards >= 1:
@@ -153,7 +157,11 @@ class WorkerBase(HealthCheckServer):
             return
         for msg in results:
             buf_key = self._buffer_key(msg)
+            client_id = msg.get("client_id")
+
             self._buffer.setdefault(buf_key, []).append(msg)
+            self.node_logger.append_to_buffer(client_id, buf_key, msg)
+            
             if len(self._buffer[buf_key]) >= self.batch_size:
                 self._flush_key(buf_key)
 
@@ -161,7 +169,12 @@ class WorkerBase(HealthCheckServer):
         rows = self._buffer.pop(buf_key, [])
         if not rows:
             return
-        body = serialize({"rows": rows})
+
+        body = serialize({
+            "rows": rows,
+            "_worker_node_id": f"{self.consumer_group}_{self.shard_id}"
+        })
+        
         try:
             if self.output_exchange and self.output_shards >= 1:
                 self._producer.send_to_shard(body, int(buf_key))
@@ -176,6 +189,11 @@ class WorkerBase(HealthCheckServer):
             else:
                 self._producer.send(body)
 
+        clients_in_batch = {row.get("client_id") for row in rows}
+        for cid in clients_in_batch:
+            if hasattr(self, "node_logger"):
+                self.node_logger.clear_buffer(cid, buf_key)
+
     def _flush_all(self):
         for key in list(self._buffer.keys()):
             self._flush_key(key)
@@ -183,9 +201,14 @@ class WorkerBase(HealthCheckServer):
     def _send_eof(self, client_id=None):
         if self._producer is None:
             return
-        eof_msg = {"type": "eof"}
+            
+        eof_msg = {
+            "type": "eof",
+            "_worker_node_id": f"{self.consumer_group}_{self.shard_id}"
+        }
         if client_id is not None:
             eof_msg["client_id"] = client_id
+            
         eof_body = serialize(eof_msg)
         try:
             if self.output_exchange and self.output_shards >= 1:
@@ -205,90 +228,147 @@ class WorkerBase(HealthCheckServer):
 
     def run(self):
         logger.info(f"{self.__class__.__name__} iniciando")
-        eof_count = [0]
-        eof_per_client = {}
+        
+        eof_global_senders = self.eof_global_senders
+        eof_client_senders = self.eof_client_senders
         done_clients = set()
-        checkpoint_counts = {}
+        
+        checkpoint_senders = {}
+        completed_checkpoints = set()
 
         def on_message(body: bytes, ack, nack):
             try:
-                #t0 = time.perf_counter()
+                msg_hash = hashlib.md5(body).hexdigest()
+                
+                if msg_hash == self.last_completed_batch:
+                    logger.warning(f"DUPLICADO IGNORADO ({msg_hash}) en {self.__class__.__name__}. Haciendo ack silencioso.")
+                    ack()
+                    return
+
                 msg = deserialize(body)
-                #t_deser = time.perf_counter() - t0
+                sender_id = msg.get("_worker_node_id") or f"unknown:{msg_hash}"
+
                 if msg.get("type") == "checkpoint":
                     client_id = msg.get("client_id")
                     checkpoint_id = msg.get("checkpoint_id")
                     chk_key = (client_id, checkpoint_id)
-                    checkpoint_counts[chk_key] = checkpoint_counts.get(chk_key, 0) + 1
-                    if checkpoint_counts[chk_key] >= self.n_upstream:
+
+                    if chk_key in completed_checkpoints:
+                        ack()
+                        return
+
+                    checkpoint_senders.setdefault(chk_key, set())
+                    if sender_id in checkpoint_senders[chk_key]:
+                        logger.warning(f"CHECKPOINT DUPLICADO IGNORADO de {sender_id}. Haciendo ack silencioso.")
+                        ack()
+                        return
+
+                    checkpoint_senders[chk_key].add(sender_id)
+
+                    if len(checkpoint_senders[chk_key]) >= self.n_upstream:
                         self._flush_all()
                         checkpoint_body = serialize({
                             "type": "checkpoint",
                             "client_id": client_id,
-                            "checkpoint_id": checkpoint_id
+                            "checkpoint_id": checkpoint_id,
+                            "_worker_node_id": f"{self.consumer_group}_{self.shard_id}"
                         })
-                        if self.output_exchange and self.output_shards >= 1:
-                            self._producer.send_eof_to_all(checkpoint_body)
-                        elif self._producer:
-                            self._producer.send(checkpoint_body)
-                        del checkpoint_counts[chk_key]
+                        
+                        try:
+                            if self.output_exchange and self.output_shards >= 1:
+                                self._producer.send_eof_to_all(checkpoint_body)
+                            elif self._producer:
+                                self._producer.send(checkpoint_body)
+                        except (MessageMiddlewareDisconnectedError, MessageMiddlewareMessageError):
+                            self._close_resources()
+                            _wait_for_rabbitmq()
+                            self._setup_connections()
+                            if self.output_exchange and self.output_shards >= 1:
+                                self._producer.send_eof_to_all(checkpoint_body)
+                            elif self._producer:
+                                self._producer.send(checkpoint_body)
+                                
+                        del checkpoint_senders[chk_key]
+                        completed_checkpoints.add(chk_key)
                     ack()
                     return
+                    
                 elif msg.get("type") == "eof":
-                    #t0_eof = time.perf_counter()
                     client_id = msg.get("client_id")
+
                     if client_id is None:
-                        eof_count[0] += 1
-                        logger.info(
-                            f"{self.__class__.__name__} EOF recibido "
-                            f"({eof_count[0]}/{self.n_upstream})"
-                        )
-                        if eof_count[0] >= self.n_upstream:
+                        if sender_id in eof_global_senders:
+                            ack()
+                            return
+                        
+                        self.node_logger.log_eof(client_id, sender_id)
+                        eof_global_senders.add(sender_id)
+                        current_eof_count = len(eof_global_senders)
+                        logger.info(f"{self.__class__.__name__} EOF global recibido ({current_eof_count}/{self.n_upstream})")
+                        
+                        ack()
+                        if current_eof_count >= self.n_upstream:
                             for result in self.on_eof(None):
                                 self._emit([result])
                             self._flush_all()
-                            self._send_eof()
+                            self._send_eof(None)
                             self._consumer.stop_consuming()
-                            logger.info(f"{self.__class__.__name__} terminado")
+                            logger.info(f"{self.__class__.__name__} terminado globalmente")
+                        return
+
+                    if client_id in done_clients:
                         ack()
                         return
 
-                    eof_per_client[client_id] = eof_per_client.get(client_id, 0) + 1
-                    logger.info(
-                        f"{self.__class__.__name__} EOF recibido para client_id={client_id} "
-                        f"({eof_per_client[client_id]}/{self.n_upstream})"
-                    )
-                    if eof_per_client[client_id] >= self.n_upstream and client_id not in done_clients:
-                        #t1 = time.perf_counter()
+                    eof_client_senders.setdefault(client_id, set())
+                    if sender_id in eof_client_senders[client_id]:
+                        ack()
+                        return
+
+                    self.node_logger.log_eof(client_id, sender_id)
+                    eof_client_senders[client_id].add(sender_id)
+                    current_eof_count = len(eof_client_senders[client_id])
+                    
+                    logger.info(f"{self.__class__.__name__} EOF recibido para client_id={client_id} ({current_eof_count}/{self.n_upstream})")
+                    
+                    if current_eof_count >= self.n_upstream:
                         for result in self.on_eof(client_id):
                             self._emit([result])
-                        #t_eof_logic = time.perf_counter() - t1
-                        #t2 = time.perf_counter()
                         self._flush_all()
                         self._send_eof(client_id)
-                        #t_eof_network = time.perf_counter() - t2
                         done_clients.add(client_id)
-                        #logger.info(f"EOF Total: {(time.perf_counter() - t0_eof):.4f}s | Lógica (on_eof): {t_eof_logic:.4f}s | Vaciado/Red: {t_eof_network:.4f}s")
 
                     if self.total_clients > 0 and len(done_clients) >= self.total_clients:
                         self._consumer.stop_consuming()
-                        logger.info(f"{self.__class__.__name__} terminado")
+                        logger.info(f"{self.__class__.__name__} terminado por alcanzar total_clients")
                     ack()
                     return
-                #t_process = 0.0
-                #t_emit = 0.0
-                for row in msg.get("rows", []):
-                    #t1 = time.perf_counter()
+
+                is_resuming = (msg_hash == self.pending_batch_id)
+                if not is_resuming:
+                    self.node_logger.save_batch_state(msg_hash, 0, self.last_completed_batch)
+                    self.pending_batch_id = msg_hash
+                    self.processed_tx_count = 0
+
+                for i, row in enumerate(msg.get("rows", [])):
+                    if is_resuming and i < self.processed_tx_count:
+                        continue
+                        
                     processed_data = self.process(row)
-                    #t2 = time.perf_counter()
-                    
                     self._emit(processed_data)
-                    #t3 = time.perf_counter()
-                    
-                    #t_process += (t2 - t1)
-                    #t_emit += (t3 - t2)
+
+                    if i % 100 == 0 and i > 0:
+                        self.node_logger.save_batch_state(msg_hash, i, self.last_completed_batch)
+                        self._consumer.process_events()
+                        if self._producer:
+                            self._producer.process_events()
+
+                self.node_logger.save_batch_state(None, 0, msg_hash)
+                self.pending_batch_id = None
+                self.processed_tx_count = 0
+                self.last_completed_batch = msg_hash
+
                 ack()
-                #logger.info(f"Tiempos -> Deserializar: {t_deser:.4f}s | Process: {t_process:.4f}s | Emit/Red: {t_emit:.4f}s")
             except Exception as e:
                 logger.error(f"Error procesando mensaje: {e}")
                 nack()
