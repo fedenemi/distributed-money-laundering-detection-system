@@ -91,12 +91,24 @@ Tambien se puede limitar a un solo evento real:
 python scripts/chaos_monkey.py --once
 ```
 
+Para probar un nodo puntual sin modificar el YAML:
+
+```bash
+python scripts/chaos_monkey.py --once --service q2_banks_name_adder_0
+```
+
+Tambien se puede elegir por regex:
+
+```bash
+python scripts/chaos_monkey.py --once --pattern '^q3_avg_and_transactions_joiner_0$'
+```
+
 La configuracion permite definir:
 
 - `allowed_services`: servicios exactos que pueden ser detenidos.
 - `allowed_patterns`: patrones regex de servicios permitidos.
 - `exclude_services` y `exclude_patterns`: servicios que nunca se deben tocar.
-- `action`: `restart`, `stop`, `stop_start` o `kill_start`.
+- `action`: `restart`, `stop`, `kill`, `stop_start` o `kill_start`.
 - `interval_seconds`: rango de espera entre fallos.
 - `downtime_seconds`: rango de tiempo que un servicio queda detenido.
 - `max_events`: cantidad maxima de eventos antes de terminar.
