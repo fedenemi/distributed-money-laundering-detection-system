@@ -339,6 +339,82 @@ class WorkerBaseDoubleIO(HealthCheckServer):
     def _flush_all_next_stage(self):
         self._flush_all_main_buffer()
         self._flush_all_sec_buffer()
+        self._flush_main_control_buffer()
+        self._flush_sec_control_buffer()
+
+    def _emit_main_control(self, msg: dict):
+        if self._main_producer is None:
+            return
+        record = {
+            "client_id": msg.get("client_id"),
+            "message": msg,
+        }
+        self._main_control_buffer.append(record)
+        self.node_logger.append_to_buffer(record["client_id"], "control_main", record)
+        self._flush_main_control_buffer()
+
+    def _emit_sec_control(self, msg: dict):
+        if self._sec_producer is None:
+            return
+        record = {
+            "client_id": msg.get("client_id"),
+            "message": msg,
+        }
+        self._sec_control_buffer.append(record)
+        self.node_logger.append_to_buffer(record["client_id"], "control_sec", record)
+        self._flush_sec_control_buffer()
+
+    def _send_main_control_body(self, body: bytes):
+        self._ensure_main_producer()
+        try:
+            if self.main_output_exchange and self.main_output_shards > 1:
+                self._main_producer.send_eof_to_all(body)
+            else:
+                self._main_producer.send(body)
+        except (MessageMiddlewareDisconnectedError, MessageMiddlewareMessageError):
+            self._ensure_main_producer()
+            if self.main_output_exchange and self.main_output_shards > 1:
+                self._main_producer.send_eof_to_all(body)
+            else:
+                self._main_producer.send(body)
+
+    def _send_sec_control_body(self, body: bytes):
+        self._ensure_sec_producer()
+        try:
+            if self.sec_output_exchange and self.sec_output_shards > 1:
+                self._sec_producer.send_eof_to_all(body)
+            else:
+                self._sec_producer.send(body)
+        except (MessageMiddlewareDisconnectedError, MessageMiddlewareMessageError):
+            self._ensure_sec_producer()
+            if self.sec_output_exchange and self.sec_output_shards > 1:
+                self._sec_producer.send_eof_to_all(body)
+            else:
+                self._sec_producer.send(body)
+
+    def _flush_main_control_buffer(self):
+        records = self._main_control_buffer
+        if not records:
+            return
+        self._main_control_buffer = []
+        for record in records:
+            self._send_main_control_body(serialize(record["message"]))
+
+        clients_in_batch = {record.get("client_id") for record in records}
+        for cid in clients_in_batch:
+            self.node_logger.clear_buffer(cid, "control_main")
+
+    def _flush_sec_control_buffer(self):
+        records = self._sec_control_buffer
+        if not records:
+            return
+        self._sec_control_buffer = []
+        for record in records:
+            self._send_sec_control_body(serialize(record["message"]))
+
+        clients_in_batch = {record.get("client_id") for record in records}
+        for cid in clients_in_batch:
+            self.node_logger.clear_buffer(cid, "control_sec")
 
     def _eof_done_key(self, event: str, client_id=None) -> str:
         client_key = "__global__" if client_id is None else str(client_id)
@@ -383,48 +459,22 @@ class WorkerBaseDoubleIO(HealthCheckServer):
     def _send_main_checkpoint(self, client_id, checkpoint_id):
         if self._main_producer is None:
             return
-        chk_msg = {
+        self._emit_main_control({
             "type": "checkpoint", 
             "client_id": client_id, 
             "checkpoint_id": checkpoint_id,
             "worker_node_id": f"{self.consumer_group}_{self.shard_id}_main"
-        }
-        chk_body = serialize(chk_msg)
-        self._ensure_main_producer()
-        try:
-            if self.main_output_exchange and self.main_output_shards > 1:
-                self._main_producer.send_eof_to_all(chk_body)
-            else:
-                self._main_producer.send(chk_body)
-        except MessageMiddlewareDisconnectedError:
-            self._ensure_main_producer()
-            if self.main_output_exchange and self.main_output_shards > 1:
-                self._main_producer.send_eof_to_all(chk_body)
-            else:
-                self._main_producer.send(chk_body)
+        })
 
     def _send_sec_checkpoint(self, client_id, checkpoint_id):
         if self._sec_producer is None:
             return
-        chk_msg = {
+        self._emit_sec_control({
             "type": "checkpoint", 
             "client_id": client_id, 
             "checkpoint_id": checkpoint_id,
             "worker_node_id": f"{self.consumer_group}_{self.shard_id}_sec"
-        }
-        chk_body = serialize(chk_msg)
-        self._ensure_sec_producer()
-        try:
-            if self.sec_output_exchange and self.sec_output_shards > 1:
-                self._sec_producer.send_eof_to_all(chk_body)
-            else:
-                self._sec_producer.send(chk_body)
-        except MessageMiddlewareDisconnectedError:
-            self._ensure_sec_producer()
-            if self.sec_output_exchange and self.sec_output_shards > 1:
-                self._sec_producer.send_eof_to_all(chk_body)
-            else:
-                self._sec_producer.send(chk_body)
+        })
 
     def _send_main_output_eof(self, client_id=None):
         if self._main_producer is None:
@@ -435,19 +485,7 @@ class WorkerBaseDoubleIO(HealthCheckServer):
         }
         if client_id is not None:
             eof_msg["client_id"] = client_id
-        eof_body = serialize(eof_msg)
-        self._ensure_main_producer()
-        try:
-            if self.main_output_exchange and self.main_output_shards > 1:
-                self._main_producer.send_eof_to_all(eof_body)
-            else:
-                self._main_producer.send(eof_body)
-        except MessageMiddlewareDisconnectedError:
-            self._ensure_main_producer()
-            if self.main_output_exchange and self.main_output_shards > 1:
-                self._main_producer.send_eof_to_all(eof_body)
-            else:
-                self._main_producer.send(eof_body)
+        self._emit_main_control(eof_msg)
     
     def _send_sec_output_eof(self, client_id=None):
         if self._sec_producer is None:
@@ -458,19 +496,7 @@ class WorkerBaseDoubleIO(HealthCheckServer):
         }
         if client_id is not None:
             eof_msg["client_id"] = client_id
-        eof_body = serialize(eof_msg)
-        self._ensure_sec_producer()
-        try:
-            if self.sec_output_exchange and self.sec_output_shards > 1:
-                self._sec_producer.send_eof_to_all(eof_body)
-            else:
-                self._sec_producer.send(eof_body)
-        except MessageMiddlewareDisconnectedError:
-            self._ensure_sec_producer()
-            if self.sec_output_exchange and self.sec_output_shards > 1:
-                self._sec_producer.send_eof_to_all(eof_body)
-            else:
-                self._sec_producer.send(eof_body)
+        self._emit_sec_control(eof_msg)
 
     def _execute_eof_main_input(self, client_id=None):
         if self._operation_mode == "PIPELINE":
@@ -984,11 +1010,13 @@ class WorkerBaseDoubleIO(HealthCheckServer):
         self.main_output_exchange = os.environ.get("MAIN_OUTPUT_EXCHANGE", "")
         self.main_output_shards   = int(os.environ.get("MAIN_OUTPUT_SHARDS", "1"))
         self._main_out_buffer: dict = {}
+        self._main_control_buffer: list = []
 
         self.sec_output_queue    = os.environ.get("SECONDARY_OUTPUT_QUEUE", "")
         self.sec_output_exchange = os.environ.get("SECONDARY_OUTPUT_EXCHANGE", "")
         self.sec_output_shards   = int(os.environ.get("SEC_OUTPUT_SHARDS", os.environ.get("SECONDARY_OUTPUT_SHARDS", "1")))
         self._sec_out_buffer: dict = {}
+        self._sec_control_buffer: list = []
 
         # Setup connections
         # Main input
@@ -1030,6 +1058,13 @@ class WorkerBaseDoubleIO(HealthCheckServer):
             elif raw_buf_key.startswith("out_sec_"):
                 real_key = raw_buf_key.replace("out_sec_", "")
                 self._sec_out_buffer.setdefault(real_key, []).extend(msgs)
+            elif raw_buf_key == "control_main":
+                self._main_control_buffer.extend(msgs)
+            elif raw_buf_key == "control_sec":
+                self._sec_control_buffer.extend(msgs)
+
+        self._flush_main_control_buffer()
+        self._flush_sec_control_buffer()
 
         recovered_eof_global, eof_clients = self.node_logger.recover_eofs()
         for cid, senders in eof_clients.items():
@@ -1077,12 +1112,14 @@ class WorkerBaseDoubleIO(HealthCheckServer):
         self.main_output_exchange = os.environ.get("MAIN_OUTPUT_EXCHANGE", "")
         self.main_output_shards   = int(os.environ.get("MAIN_OUTPUT_SHARDS", "1"))
         self._main_out_buffer: dict = {}
+        self._main_control_buffer: list = []
 
         # Secondary output
         self.sec_output_queue    = os.environ.get("SECONDARY_OUTPUT_QUEUE", "")
         self.sec_output_exchange = os.environ.get("SECONDARY_OUTPUT_EXCHANGE", "")
         self.sec_output_shards   = int(os.environ.get("SEC_OUTPUT_SHARDS", os.environ.get("SECONDARY_OUTPUT_SHARDS", "1")))
         self._sec_out_buffer: dict = {}
+        self._sec_control_buffer: list = []
 
         # Setup connections
         # Secondary input
@@ -1125,6 +1162,13 @@ class WorkerBaseDoubleIO(HealthCheckServer):
             elif raw_buf_key.startswith("out_sec_"):
                 real_key = raw_buf_key.replace("out_sec_", "")
                 self._sec_out_buffer.setdefault(real_key, []).extend(msgs)
+            elif raw_buf_key == "control_main":
+                self._main_control_buffer.extend(msgs)
+            elif raw_buf_key == "control_sec":
+                self._sec_control_buffer.extend(msgs)
+
+        self._flush_main_control_buffer()
+        self._flush_sec_control_buffer()
 
         recovered_eof_global, eof_clients = self.node_logger.recover_eofs()
         for cid, senders in eof_clients.items():
