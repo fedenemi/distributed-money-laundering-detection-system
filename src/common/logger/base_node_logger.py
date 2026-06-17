@@ -121,9 +121,12 @@ class BaseNodeLogger:
         return "__global__" if client_id is None else str(client_id)
 
     def log_eof_done(self, client_id: Optional[str]):
+        self.log_eof_done_key(self._eof_done_key(client_id), client_id)
+
+    def log_eof_done_key(self, key: str, client_id: Optional[str] = None):
         self._write_in_file(self._eof_done_fd, {
             "client_id": client_id,
-            "key": self._eof_done_key(client_id),
+            "key": key,
         }, sync=True)
 
     def recover_eof_done(self) -> Set[str]:
@@ -136,7 +139,9 @@ class BaseNodeLogger:
         return completed
 
     def clear_eof_done(self, client_id: Optional[str]):
-        key_to_clear = self._eof_done_key(client_id)
+        self.clear_eof_done_key(self._eof_done_key(client_id))
+
+    def clear_eof_done_key(self, key_to_clear: str):
         records = [
             record
             for record in self._read_from_file(self.eof_done_filepath)

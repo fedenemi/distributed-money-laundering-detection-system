@@ -340,6 +340,46 @@ class WorkerBaseDoubleIO(HealthCheckServer):
         self._flush_all_main_buffer()
         self._flush_all_sec_buffer()
 
+    def _eof_done_key(self, event: str, client_id=None) -> str:
+        client_key = "__global__" if client_id is None else str(client_id)
+        return f"{event}:{client_key}"
+
+    def _eof_is_done(self, event: str, client_id=None) -> bool:
+        return self._eof_done_key(event, client_id) in self.completed_eofs
+
+    def _mark_eof_done(self, event: str, client_id=None):
+        key = self._eof_done_key(event, client_id)
+        if key in self.completed_eofs:
+            return
+        self.node_logger.log_eof_done_key(key, client_id)
+        self.completed_eofs.add(key)
+
+    def _clear_eof_done_for_new_rows(self, rows: list):
+        first_row = rows[0] if rows else None
+        if not isinstance(first_row, dict):
+            return
+
+        client_id = first_row.get("client_id")
+        if client_id is None:
+            return
+
+        events = ("main", "secondary", "secondary_ready", "both")
+        if not any(self._eof_is_done(event, client_id) for event in events):
+            return
+
+        logger.info(f"{self.__class__.__name__} nueva ejecucion para client_id={client_id}; limpiando EOF completado anterior")
+        for event in events:
+            key = self._eof_done_key(event, client_id)
+            self.node_logger.clear_eof_done_key(key)
+            self.completed_eofs.discard(key)
+
+        self.node_logger.clear_eof(client_id)
+        with self._eof_lock:
+            self._clients_eof_main_input.pop(client_id, None)
+            self._clients_eof_sec_input.pop(client_id, None)
+            self._clients_joined.pop(client_id, None)
+            self._clients_secondary_ready.pop(client_id, None)
+
     def _send_main_checkpoint(self, client_id, checkpoint_id):
         if self._main_producer is None:
             return
@@ -438,6 +478,8 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                 self._execute_pipeline_both_eofs(client_id)
                 return
             if self._sender_count(self._clients_eof_main_input, client_id) >= self.main_n_upstream:
+                if self._eof_is_done("main", client_id):
+                    return
                 for result in self.on_main_input_eof(client_id):
                     self._emit_results_main_stage([result])
                 self._flush_all_next_stage()
@@ -446,9 +488,13 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                     self._send_main_output_eof(client_id)
                 if self.main_eof_dest in ["SECONDARY", "BOTH"]:
                     self._send_sec_output_eof(client_id)
+                self._mark_eof_done("main", client_id)
         else: #For joiner, check if joiner action is necessary
             with self._eof_lock:
                 if self._clients_joined.get(client_id, False):
+                    return
+                if self._eof_is_done("both", client_id):
+                    self._clients_joined[client_id] = True
                     return
 
                 main_ready = self._sender_count(self._clients_eof_main_input, client_id) >= self.main_n_upstream
@@ -461,6 +507,7 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                         self._emit_main_output([result])
                     self._flush_all_main_buffer()
                     self._send_main_output_eof(client_id)
+                    self._mark_eof_done("both", client_id)
 
     def _execute_eof_sec_input(self, client_id=None):
         if self._operation_mode == "PIPELINE":
@@ -468,6 +515,8 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                 self._execute_pipeline_both_eofs(client_id)
                 return
             if self._sender_count(self._clients_eof_sec_input, client_id) >= self.sec_n_upstream:
+                if self._eof_is_done("secondary", client_id):
+                    return
                 for result in self.on_secondary_input_eof(client_id):
                     self._emit_sec_output([result])
                 self._flush_all_sec_buffer()
@@ -476,20 +525,25 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                     self._send_main_output_eof(client_id)
                 if self.sec_eof_dest in ["SECONDARY", "BOTH"]:
                     self._send_sec_output_eof(client_id)
+                self._mark_eof_done("secondary", client_id)
         else: # For joiner, check if joiner action is necessary
             with self._eof_lock:
                 if self._clients_joined.get(client_id, False):
+                    return
+                if self._eof_is_done("both", client_id):
+                    self._clients_joined[client_id] = True
                     return
 
                 main_ready = self._sender_count(self._clients_eof_main_input, client_id) >= self.main_n_upstream
                 sec_ready = self._sender_count(self._clients_eof_sec_input, client_id) >= self.sec_n_upstream
                 
-                if sec_ready and not self._clients_secondary_ready.get(client_id, False):
+                if sec_ready and not self._clients_secondary_ready.get(client_id, False) and not self._eof_is_done("secondary_ready", client_id):
                     self._clients_secondary_ready[client_id] = True
 
                     for result in self.on_secondary_ready(client_id):
                         self._emit_main_output([result])
                     self._flush_all_main_buffer()
+                    self._mark_eof_done("secondary_ready", client_id)
                 
                 if main_ready and sec_ready:
                     self._clients_joined[client_id] = True
@@ -498,10 +552,14 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                         self._emit_main_output([result])
                     self._flush_all_main_buffer()
                     self._send_main_output_eof(client_id)
+                    self._mark_eof_done("both", client_id)
 
     def _execute_pipeline_both_eofs(self, client_id=None):
         with self._eof_lock:
             if self._clients_joined.get(client_id, False):
+                return
+            if self._eof_is_done("both", client_id):
+                self._clients_joined[client_id] = True
                 return
 
             main_ready = self._sender_count(self._clients_eof_main_input, client_id) >= self.main_n_upstream
@@ -522,6 +580,7 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                 self._send_main_output_eof(client_id)
             if self.main_eof_dest in ["SECONDARY", "BOTH"] or self.sec_eof_dest in ["SECONDARY", "BOTH"]:
                 self._send_sec_output_eof(client_id)
+            self._mark_eof_done("both", client_id)
 
     # --- Loop principal ---------------------------------------------------------
 
@@ -607,6 +666,17 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                             logger.info(f"{self.__class__.__name__} terminado")
                         return
 
+                    if (
+                        self._eof_is_done("both", client_id)
+                        or (
+                            self._operation_mode == "PIPELINE"
+                            and not self.waits_for_both_pipeline_eofs()
+                            and self._eof_is_done("main", client_id)
+                        )
+                    ):
+                        ack()
+                        return
+
                     if self._clients_joined.get(client_id, False):
                         ack()
                         return
@@ -636,12 +706,16 @@ class WorkerBaseDoubleIO(HealthCheckServer):
 
                 else:
                     is_resuming = (msg_hash == self.pending_batch_id)
+                    rows = msg.get("rows", [])
+                    if rows:
+                        self._clear_eof_done_for_new_rows(rows)
+
                     if not is_resuming:
                         self.node_logger.save_batch_state(msg_hash, 0, self.last_completed_batch)
                         self.pending_batch_id = msg_hash
                         self.processed_tx_count = 0
 
-                    for i, row in enumerate(msg.get("rows", [])):
+                    for i, row in enumerate(rows):
                         if is_resuming and i < self.processed_tx_count:
                             continue
                             
@@ -765,6 +839,17 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                             logger.info(f"{self.__class__.__name__} terminado")
                         return
 
+                    if (
+                        self._eof_is_done("both", client_id)
+                        or (
+                            self._operation_mode == "PIPELINE"
+                            and not self.waits_for_both_pipeline_eofs()
+                            and self._eof_is_done("secondary", client_id)
+                        )
+                    ):
+                        ack()
+                        return
+
                     if self._clients_joined.get(client_id, False):
                         ack()
                         return
@@ -794,12 +879,16 @@ class WorkerBaseDoubleIO(HealthCheckServer):
 
                 else:
                     is_resuming = (msg_hash == self.pending_batch_id)
+                    rows = msg.get("rows", [])
+                    if rows:
+                        self._clear_eof_done_for_new_rows(rows)
+
                     if not is_resuming:
                         self.node_logger.save_batch_state(msg_hash, 0, self.last_completed_batch)
                         self.pending_batch_id = msg_hash
                         self.processed_tx_count = 0
 
-                    for i, row in enumerate(msg.get("rows", [])):
+                    for i, row in enumerate(rows):
                         if is_resuming and i < self.processed_tx_count:
                             continue
                             
@@ -931,6 +1020,7 @@ class WorkerBaseDoubleIO(HealthCheckServer):
 
         # Recover state
         self.pending_batch_id, self.processed_tx_count, self.last_completed_batch = self.node_logger.recover_batch_state()
+        self.completed_eofs = self.node_logger.recover_eof_done()
 
         recovered_buffers = self.node_logger.load_all_buffers()
         for (client_id, raw_buf_key), msgs in recovered_buffers.items():
@@ -1025,6 +1115,7 @@ class WorkerBaseDoubleIO(HealthCheckServer):
 
         # Recover state
         self.pending_batch_id, self.processed_tx_count, self.last_completed_batch = self.node_logger.recover_batch_state()
+        self.completed_eofs = self.node_logger.recover_eof_done()
 
         recovered_buffers = self.node_logger.load_all_buffers()
         for (client_id, raw_buf_key), msgs in recovered_buffers.items():

@@ -284,19 +284,23 @@ class WorkerBase(HealthCheckServer):
         self.completed_eofs.add(key)
 
     def _clear_eof_done_for_new_rows(self, rows: list):
-        client_ids = set()
-        for row in rows:
-            if isinstance(row, dict) and row.get("client_id") is not None:
-                client_ids.add(row.get("client_id"))
+        first_row = rows[0] if rows else None
+        if not isinstance(first_row, dict):
+            return
 
-        for client_id in client_ids:
-            key = self._eof_done_key(client_id)
-            if key in self.completed_eofs:
-                logger.info(f"{self.__class__.__name__} nueva ejecucion para client_id={client_id}; limpiando EOF completado anterior")
-                self.node_logger.clear_eof_done(client_id)
-                self.node_logger.clear_eof(client_id)
-                self.completed_eofs.discard(key)
-                self.eof_client_senders.pop(client_id, None)
+        client_id = first_row.get("client_id")
+        if client_id is None:
+            return
+
+        key = self._eof_done_key(client_id)
+        if key not in self.completed_eofs:
+            return
+
+        logger.info(f"{self.__class__.__name__} nueva ejecucion para client_id={client_id}; limpiando EOF completado anterior")
+        self.node_logger.clear_eof_done(client_id)
+        self.node_logger.clear_eof(client_id)
+        self.completed_eofs.discard(key)
+        self.eof_client_senders.pop(client_id, None)
 
     def _finish_eof(self, client_id=None):
         if self._eof_is_done(client_id):
