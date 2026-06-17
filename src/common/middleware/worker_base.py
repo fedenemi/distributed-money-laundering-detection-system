@@ -74,6 +74,7 @@ class WorkerBase(HealthCheckServer):
             self._buffer.setdefault(buf_key, []).extend(msgs)
 
         self.eof_global_senders, self.eof_client_senders = self.node_logger.recover_eofs()
+        self.completed_eofs = self.node_logger.recover_eof_done()
 
         signal.signal(signal.SIGTERM, self._handle_sigterm)
 
@@ -269,11 +270,44 @@ class WorkerBase(HealthCheckServer):
             "_worker_node_id": f"{self.consumer_group}_{self.shard_id}",
         })
 
+    def _eof_done_key(self, client_id=None) -> str:
+        return "__global__" if client_id is None else str(client_id)
+
+    def _eof_is_done(self, client_id=None) -> bool:
+        return self._eof_done_key(client_id) in self.completed_eofs
+
+    def _mark_eof_done(self, client_id=None):
+        key = self._eof_done_key(client_id)
+        if key in self.completed_eofs:
+            return
+        self.node_logger.log_eof_done(client_id)
+        self.completed_eofs.add(key)
+
+    def _clear_eof_done_for_new_rows(self, rows: list):
+        client_ids = set()
+        for row in rows:
+            if isinstance(row, dict) and row.get("client_id") is not None:
+                client_ids.add(row.get("client_id"))
+
+        for client_id in client_ids:
+            key = self._eof_done_key(client_id)
+            if key in self.completed_eofs:
+                logger.info(f"{self.__class__.__name__} nueva ejecucion para client_id={client_id}; limpiando EOF completado anterior")
+                self.node_logger.clear_eof_done(client_id)
+                self.node_logger.clear_eof(client_id)
+                self.completed_eofs.discard(key)
+                self.eof_client_senders.pop(client_id, None)
+
     def _finish_eof(self, client_id=None):
+        if self._eof_is_done(client_id):
+            logger.info(f"{self.__class__.__name__} EOF ya finalizado para client_id={client_id}; no se reemite")
+            return
+
         for result in self.on_eof(client_id):
             self._emit([result])
         self._flush_all()
         self._send_eof(client_id)
+        self._mark_eof_done(client_id)
 
     # --- Loop principal ---------------------------------------------------------
 
@@ -328,6 +362,10 @@ class WorkerBase(HealthCheckServer):
                     client_id = msg.get("client_id")
 
                     if client_id is None:
+                        if self._eof_is_done(None):
+                            ack()
+                            return
+
                         if sender_id in eof_global_senders:
                             if len(eof_global_senders) >= self.n_upstream:
                                 self._finish_eof(None)
@@ -347,7 +385,7 @@ class WorkerBase(HealthCheckServer):
                         ack()
                         return
 
-                    if client_id in done_clients:
+                    if client_id in done_clients or self._eof_is_done(client_id):
                         ack()
                         return
 
@@ -373,12 +411,16 @@ class WorkerBase(HealthCheckServer):
                     return
 
                 is_resuming = (msg_hash == self.pending_batch_id)
+                rows = msg.get("rows", [])
+                if rows:
+                    self._clear_eof_done_for_new_rows(rows)
+
                 if not is_resuming:
                     self.node_logger.save_batch_state(msg_hash, 0, self.last_completed_batch)
                     self.pending_batch_id = msg_hash
                     self.processed_tx_count = 0
 
-                for i, row in enumerate(msg.get("rows", [])):
+                for i, row in enumerate(rows):
                     if is_resuming and i < self.processed_tx_count:
                         continue
                         

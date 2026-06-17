@@ -11,12 +11,16 @@ class BaseNodeLogger:
     def __init__(self, base_filepath: str):
         self.base_filepath = base_filepath
         self.eof_filepath = f"{base_filepath}_eof.log"
+        self.eof_done_filepath = f"{base_filepath}_eof_done.log"
         self.batch_state_filepath = f"{base_filepath}_batch_state.json"
 
         if not os.path.exists(self.eof_filepath):
             open(self.eof_filepath, 'ab').close()
+        if not os.path.exists(self.eof_done_filepath):
+            open(self.eof_done_filepath, 'ab').close()
 
         self._eof_fd = open(self.eof_filepath, 'ab')
+        self._eof_done_fd = open(self.eof_done_filepath, 'ab')
         self._buffer_fds: Dict[Tuple[str, str], Any] = {}
 
     def _write_in_file(self, fd, data: Dict[str, Any], sync: bool = True):
@@ -93,6 +97,64 @@ class BaseNodeLogger:
                 eof_clients.setdefault(cid, set()).add(eid)
         return eof_global, eof_clients
 
+    def clear_eof(self, client_id: Optional[str]):
+        records = [
+            record
+            for record in self._read_from_file(self.eof_filepath)
+            if record.get("client_id") != client_id
+        ]
+
+        tmp_path = self.eof_filepath + ".tmp"
+        with open(tmp_path, "wb") as tmp_fd:
+            for record in records:
+                self._write_in_file(tmp_fd, record, sync=False)
+            tmp_fd.flush()
+            os.fsync(tmp_fd.fileno())
+        os.replace(tmp_path, self.eof_filepath)
+
+        if self._eof_fd and not self._eof_fd.closed:
+            self._eof_fd.close()
+        self._eof_fd = open(self.eof_filepath, 'ab')
+
+
+    def _eof_done_key(self, client_id: Optional[str]) -> str:
+        return "__global__" if client_id is None else str(client_id)
+
+    def log_eof_done(self, client_id: Optional[str]):
+        self._write_in_file(self._eof_done_fd, {
+            "client_id": client_id,
+            "key": self._eof_done_key(client_id),
+        }, sync=True)
+
+    def recover_eof_done(self) -> Set[str]:
+        completed = set()
+        for record in self._read_from_file(self.eof_done_filepath):
+            key = record.get("key")
+            if key is None:
+                key = self._eof_done_key(record.get("client_id"))
+            completed.add(key)
+        return completed
+
+    def clear_eof_done(self, client_id: Optional[str]):
+        key_to_clear = self._eof_done_key(client_id)
+        records = [
+            record
+            for record in self._read_from_file(self.eof_done_filepath)
+            if (record.get("key") or self._eof_done_key(record.get("client_id"))) != key_to_clear
+        ]
+
+        tmp_path = self.eof_done_filepath + ".tmp"
+        with open(tmp_path, "wb") as tmp_fd:
+            for record in records:
+                self._write_in_file(tmp_fd, record, sync=False)
+            tmp_fd.flush()
+            os.fsync(tmp_fd.fileno())
+        os.replace(tmp_path, self.eof_done_filepath)
+
+        if self._eof_done_fd and not self._eof_done_fd.closed:
+            self._eof_done_fd.close()
+        self._eof_done_fd = open(self.eof_done_filepath, 'ab')
+
     def _get_buffer_filepath(self, client_id: Optional[str], buf_key: str) -> str:
         safe_cid = client_id if client_id is not None else "global"
         return f"{self.base_filepath}_buf_{safe_cid}_{buf_key}.log"
@@ -141,6 +203,8 @@ class BaseNodeLogger:
     def close(self):
         if self._eof_fd and not self._eof_fd.closed:
             self._eof_fd.close()
+        if self._eof_done_fd and not self._eof_done_fd.closed:
+            self._eof_done_fd.close()
         for fd in self._buffer_fds.values():
             if not fd.closed:
                 fd.close()
