@@ -75,6 +75,7 @@ class WorkerBase(HealthCheckServer):
 
         self.eof_global_senders, self.eof_client_senders = self.node_logger.recover_eofs()
         self.completed_eofs = self.node_logger.recover_eof_done()
+        self.completed_checkpoints = self.node_logger.recover_checkpoint_done()
 
         signal.signal(signal.SIGTERM, self._handle_sigterm)
 
@@ -283,6 +284,20 @@ class WorkerBase(HealthCheckServer):
         self.node_logger.log_eof_done(client_id)
         self.completed_eofs.add(key)
 
+    def _checkpoint_done_key(self, client_id, checkpoint_id) -> str:
+        client_key = "__global__" if client_id is None else str(client_id)
+        return f"{client_key}:{checkpoint_id}"
+
+    def _checkpoint_is_done(self, client_id, checkpoint_id) -> bool:
+        return self._checkpoint_done_key(client_id, checkpoint_id) in self.completed_checkpoints
+
+    def _mark_checkpoint_done(self, client_id, checkpoint_id):
+        key = self._checkpoint_done_key(client_id, checkpoint_id)
+        if key in self.completed_checkpoints:
+            return
+        self.node_logger.log_checkpoint_done_key(key, client_id, checkpoint_id)
+        self.completed_checkpoints.add(key)
+
     def _clear_eof_done_for_new_rows(self, rows: list):
         first_row = rows[0] if rows else None
         if not isinstance(first_row, dict):
@@ -299,7 +314,13 @@ class WorkerBase(HealthCheckServer):
         logger.info(f"{self.__class__.__name__} nueva ejecucion para client_id={client_id}; limpiando EOF completado anterior")
         self.node_logger.clear_eof_done(client_id)
         self.node_logger.clear_eof(client_id)
+        self.node_logger.clear_checkpoint_done_for_client(client_id)
         self.completed_eofs.discard(key)
+        self.completed_checkpoints = {
+            checkpoint_key
+            for checkpoint_key in self.completed_checkpoints
+            if not checkpoint_key.startswith(f"{client_id}:")
+        }
         self.eof_client_senders.pop(client_id, None)
 
     def _finish_eof(self, client_id=None):
@@ -323,7 +344,6 @@ class WorkerBase(HealthCheckServer):
         done_clients = set()
         
         checkpoint_senders = {}
-        completed_checkpoints = set()
 
         def on_message(body: bytes, ack, nack):
             try:
@@ -342,7 +362,7 @@ class WorkerBase(HealthCheckServer):
                     checkpoint_id = msg.get("checkpoint_id")
                     chk_key = (client_id, checkpoint_id)
 
-                    if chk_key in completed_checkpoints:
+                    if self._checkpoint_is_done(client_id, checkpoint_id):
                         ack()
                         return
 
@@ -358,7 +378,7 @@ class WorkerBase(HealthCheckServer):
                         self._flush_all()
                         self._send_checkpoint(client_id, checkpoint_id)
                         del checkpoint_senders[chk_key]
-                        completed_checkpoints.add(chk_key)
+                        self._mark_checkpoint_done(client_id, checkpoint_id)
                     ack()
                     return
                     

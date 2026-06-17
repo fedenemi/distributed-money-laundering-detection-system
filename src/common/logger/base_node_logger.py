@@ -12,15 +12,19 @@ class BaseNodeLogger:
         self.base_filepath = base_filepath
         self.eof_filepath = f"{base_filepath}_eof.log"
         self.eof_done_filepath = f"{base_filepath}_eof_done.log"
+        self.checkpoint_done_filepath = f"{base_filepath}_checkpoint_done.log"
         self.batch_state_filepath = f"{base_filepath}_batch_state.json"
 
         if not os.path.exists(self.eof_filepath):
             open(self.eof_filepath, 'ab').close()
         if not os.path.exists(self.eof_done_filepath):
             open(self.eof_done_filepath, 'ab').close()
+        if not os.path.exists(self.checkpoint_done_filepath):
+            open(self.checkpoint_done_filepath, 'ab').close()
 
         self._eof_fd = open(self.eof_filepath, 'ab')
         self._eof_done_fd = open(self.eof_done_filepath, 'ab')
+        self._checkpoint_done_fd = open(self.checkpoint_done_filepath, 'ab')
         self._buffer_fds: Dict[Tuple[str, str], Any] = {}
 
     def _write_in_file(self, fd, data: Dict[str, Any], sync: bool = True):
@@ -160,6 +164,41 @@ class BaseNodeLogger:
             self._eof_done_fd.close()
         self._eof_done_fd = open(self.eof_done_filepath, 'ab')
 
+    def log_checkpoint_done_key(self, key: str, client_id: Optional[str] = None, checkpoint_id: Optional[str] = None):
+        self._write_in_file(self._checkpoint_done_fd, {
+            "client_id": client_id,
+            "checkpoint_id": checkpoint_id,
+            "key": key,
+        }, sync=True)
+
+    def recover_checkpoint_done(self) -> Set[str]:
+        completed = set()
+        for record in self._read_from_file(self.checkpoint_done_filepath):
+            key = record.get("key")
+            if key is not None:
+                completed.add(key)
+        return completed
+
+    def clear_checkpoint_done_for_client(self, client_id: Optional[str]):
+        client_key = None if client_id is None else str(client_id)
+        records = [
+            record
+            for record in self._read_from_file(self.checkpoint_done_filepath)
+            if (None if record.get("client_id") is None else str(record.get("client_id"))) != client_key
+        ]
+
+        tmp_path = self.checkpoint_done_filepath + ".tmp"
+        with open(tmp_path, "wb") as tmp_fd:
+            for record in records:
+                self._write_in_file(tmp_fd, record, sync=False)
+            tmp_fd.flush()
+            os.fsync(tmp_fd.fileno())
+        os.replace(tmp_path, self.checkpoint_done_filepath)
+
+        if self._checkpoint_done_fd and not self._checkpoint_done_fd.closed:
+            self._checkpoint_done_fd.close()
+        self._checkpoint_done_fd = open(self.checkpoint_done_filepath, 'ab')
+
     def _get_buffer_filepath(self, client_id: Optional[str], buf_key: str) -> str:
         safe_cid = client_id if client_id is not None else "global"
         return f"{self.base_filepath}_buf_{safe_cid}_{buf_key}.log"
@@ -210,6 +249,8 @@ class BaseNodeLogger:
             self._eof_fd.close()
         if self._eof_done_fd and not self._eof_done_fd.closed:
             self._eof_done_fd.close()
+        if self._checkpoint_done_fd and not self._checkpoint_done_fd.closed:
+            self._checkpoint_done_fd.close()
         for fd in self._buffer_fds.values():
             if not fd.closed:
                 fd.close()

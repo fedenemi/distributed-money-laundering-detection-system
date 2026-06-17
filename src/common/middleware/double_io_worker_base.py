@@ -430,6 +430,29 @@ class WorkerBaseDoubleIO(HealthCheckServer):
         self.node_logger.log_eof_done_key(key, client_id)
         self.completed_eofs.add(key)
 
+    def _checkpoint_done_key(self, output: str, client_id, checkpoint_id) -> str:
+        client_key = "__global__" if client_id is None else str(client_id)
+        return f"{output}:{client_key}:{checkpoint_id}"
+
+    def _checkpoint_is_done(self, output: str, client_id, checkpoint_id) -> bool:
+        return self._checkpoint_done_key(output, client_id, checkpoint_id) in self.completed_checkpoints
+
+    def _mark_checkpoint_done(self, output: str, client_id, checkpoint_id):
+        key = self._checkpoint_done_key(output, client_id, checkpoint_id)
+        if key in self.completed_checkpoints:
+            return
+        self.node_logger.log_checkpoint_done_key(key, client_id, checkpoint_id)
+        self.completed_checkpoints.add(key)
+
+    def _clear_checkpoint_done_for_client(self, client_id):
+        self.node_logger.clear_checkpoint_done_for_client(client_id)
+        client_key = str(client_id)
+        self.completed_checkpoints = {
+            checkpoint_key
+            for checkpoint_key in self.completed_checkpoints
+            if f":{client_key}:" not in checkpoint_key
+        }
+
     def _clear_eof_done_for_new_rows(self, rows: list):
         first_row = rows[0] if rows else None
         if not isinstance(first_row, dict):
@@ -450,6 +473,7 @@ class WorkerBaseDoubleIO(HealthCheckServer):
             self.completed_eofs.discard(key)
 
         self.node_logger.clear_eof(client_id)
+        self._clear_checkpoint_done_for_client(client_id)
         with self._eof_lock:
             self._clients_eof_main_input.pop(client_id, None)
             self._clients_eof_sec_input.pop(client_id, None)
@@ -614,7 +638,6 @@ class WorkerBaseDoubleIO(HealthCheckServer):
         eof_global_senders = recovered_eof_global or set()
         chk_acks = {}
         client_eof_acks = {}
-        completed_checkpoints = set()
 
         def on_message(body: bytes, ack, nack):
             try:
@@ -632,7 +655,7 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                     chk_key = f"{client_id}_{chk_id}"
                     sender_id = self._sender_id(msg, msg_hash)
                     
-                    if chk_key in completed_checkpoints:
+                    if self._checkpoint_is_done("main", client_id, chk_id):
                         ack()
                         return
 
@@ -654,7 +677,7 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                                 for a in chk_acks[chk_key]: a()
                                 del chk_acks[chk_key]
                                 del self._checkpoints_main[chk_key]
-                                completed_checkpoints.add(chk_key)
+                                self._mark_checkpoint_done("main", client_id, chk_id)
                         else: # JOINER
                             ack()
                             main_count = len(senders)
@@ -668,7 +691,7 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                                     del self._checkpoints_sec[chk_key]
                                 except KeyError:
                                     pass
-                                completed_checkpoints.add(chk_key)
+                                self._mark_checkpoint_done("main", client_id, chk_id)
                     return
                     
                 elif msg.get("type") == "eof":
@@ -787,7 +810,6 @@ class WorkerBaseDoubleIO(HealthCheckServer):
         eof_global_senders = recovered_eof_global or set()
         chk_acks = {}
         client_eof_acks = {}
-        completed_checkpoints = set()
 
         def on_message(body: bytes, ack, nack):
             try:
@@ -805,7 +827,8 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                     chk_key = f"{client_id}_{chk_id}"
                     sender_id = self._sender_id(msg, msg_hash)
 
-                    if chk_key in completed_checkpoints:
+                    checkpoint_output = "sec" if self._operation_mode == "PIPELINE" else "main"
+                    if self._checkpoint_is_done(checkpoint_output, client_id, chk_id):
                         ack()
                         return
                     
@@ -827,7 +850,7 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                                 for a in chk_acks[chk_key]: a()
                                 del chk_acks[chk_key]
                                 del self._checkpoints_sec[chk_key]
-                                completed_checkpoints.add(chk_key)
+                                self._mark_checkpoint_done("sec", client_id, chk_id)
                         else: # JOINER
                             ack()
                             main_count = self._sender_count(self._checkpoints_main, chk_key)
@@ -841,7 +864,7 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                                     del self._checkpoints_sec[chk_key]
                                 except KeyError:
                                     pass
-                                completed_checkpoints.add(chk_key)
+                                self._mark_checkpoint_done("main", client_id, chk_id)
                     return
                     
                 elif msg.get("type") == "eof":
@@ -1049,6 +1072,7 @@ class WorkerBaseDoubleIO(HealthCheckServer):
         # Recover state
         self.pending_batch_id, self.processed_tx_count, self.last_completed_batch = self.node_logger.recover_batch_state()
         self.completed_eofs = self.node_logger.recover_eof_done()
+        self.completed_checkpoints = self.node_logger.recover_checkpoint_done()
 
         recovered_buffers = self.node_logger.load_all_buffers()
         for (client_id, raw_buf_key), msgs in recovered_buffers.items():
@@ -1153,6 +1177,7 @@ class WorkerBaseDoubleIO(HealthCheckServer):
         # Recover state
         self.pending_batch_id, self.processed_tx_count, self.last_completed_batch = self.node_logger.recover_batch_state()
         self.completed_eofs = self.node_logger.recover_eof_done()
+        self.completed_checkpoints = self.node_logger.recover_checkpoint_done()
 
         recovered_buffers = self.node_logger.load_all_buffers()
         for (client_id, raw_buf_key), msgs in recovered_buffers.items():
