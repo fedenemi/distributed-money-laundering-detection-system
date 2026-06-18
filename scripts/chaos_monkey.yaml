@@ -10,7 +10,7 @@ compose_file: docker-compose.yaml
 
 action: kill
 
-initial_delay_seconds: 20
+initial_delay_seconds: 10
 interval_seconds: [30, 90]
 downtime_seconds: [5, 20]
 max_events: 1

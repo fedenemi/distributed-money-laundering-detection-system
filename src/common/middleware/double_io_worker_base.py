@@ -208,6 +208,21 @@ class WorkerBaseDoubleIO(HealthCheckServer):
     def waits_for_both_pipeline_eofs(self) -> bool:
         return False
 
+    def supports_partial_batch_resume(self) -> bool:
+        return True
+
+    def on_main_worker_started(self):
+        return
+
+    def on_sec_worker_started(self):
+        return
+
+    def on_main_row_complete(self):
+        return
+
+    def on_sec_row_complete(self):
+        return
+
     def _routing_key(self, msg: dict) -> str:
         """Clave de particion del mensaje. Override en Splitter."""
         return "__queue__"
@@ -718,6 +733,7 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                     return
 
                 else:
+                    partial_resume_enabled = self.supports_partial_batch_resume()
                     is_resuming = (msg_hash == self.pending_batch_id)
                     rows = msg.get("rows", [])
 
@@ -727,16 +743,19 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                         self.processed_tx_count = 0
 
                     for i, row in enumerate(rows):
-                        if is_resuming and i < self.processed_tx_count:
+                        if partial_resume_enabled and is_resuming and i < self.processed_tx_count:
                             continue
-                            
+
+                        self._current_msg_hash = msg_hash
+                        self._current_row_index = i
                         if self._operation_mode == "PIPELINE":
                             self._emit_results_main_stage(self.process_main_input(row))
                         else:
                             results, _ = self.process_main_input(row)
                             self._emit_main_output(results)
+                        self.on_main_row_complete()
                             
-                        if i % 100 == 0 and i > 0:
+                        if partial_resume_enabled and i % 100 == 0 and i > 0:
                             self.node_logger.save_batch_state(msg_hash, i, self.last_completed_batch)
 
                     self.on_main_batch_complete()
@@ -748,14 +767,25 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                     
             except Exception as e:
                 logger.error(f"Error procesando mensaje: {e}")
-                nack()
+                try:
+                    nack()
+                except Exception:
+                    logger.error("No se pudo hacer nack; el canal probablemente ya esta cerrado")
 
         attempt = 0
         while self._running:
             try:
                 self._main_consumer.start_consuming(on_message)
+                if self._running:
+                    logger.info("El consumo main finalizo inesperadamente; reconectando")
+                    self._close_main_resources(close_logger=False)
+                    _wait_for_rabbitmq()
+                    self._reconnect_backoff(attempt)
+                    self._main_consumer = self._create_main_consumer()
+                    attempt += 1
+                    continue
                 break
-            except MessageMiddlewareDisconnectedError:
+            except (MessageMiddlewareDisconnectedError, MessageMiddlewareMessageError):
                 if not self._running:
                     break
                 logger.error("Conexion perdida con RabbitMQ")
@@ -764,6 +794,9 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                 self._reconnect_backoff(attempt)
                 self._main_consumer = self._create_main_consumer()
                 attempt += 1
+            except Exception as e:
+                logger.error(f"Error inesperado en main de {self.__class__.__name__}: {e}")
+                break
             finally:
                 if not self._running:
                     self._close_main_resources()
@@ -889,6 +922,7 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                     return
 
                 else:
+                    partial_resume_enabled = self.supports_partial_batch_resume()
                     is_resuming = (msg_hash == self.pending_batch_id)
                     rows = msg.get("rows", [])
 
@@ -898,15 +932,18 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                         self.processed_tx_count = 0
 
                     for i, row in enumerate(rows):
-                        if is_resuming and i < self.processed_tx_count:
+                        if partial_resume_enabled and is_resuming and i < self.processed_tx_count:
                             continue
-                            
+
+                        self._current_msg_hash = msg_hash
+                        self._current_row_index = i
                         if self._operation_mode == "PIPELINE":
                             self._emit_sec_output(self.process_secondary_input(row)[1])
                         else:
                             self.process_secondary_input(row)
+                        self.on_sec_row_complete()
 
-                        if i % 100 == 0 and i > 0:
+                        if partial_resume_enabled and i % 100 == 0 and i > 0:
                             self.node_logger.save_batch_state(msg_hash, i, self.last_completed_batch)
 
                     self.on_sec_batch_complete()
@@ -918,14 +955,25 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                     
             except Exception as e:
                 logger.error(f"Error procesando mensaje: {e}")
-                nack()
+                try:
+                    nack()
+                except Exception:
+                    logger.error("No se pudo hacer nack; el canal probablemente ya esta cerrado")
 
         attempt = 0
         while self._running:
             try:
                 self._sec_consumer.start_consuming(on_message)
+                if self._running:
+                    logger.info("El consumo secondary finalizo inesperadamente; reconectando")
+                    self._close_sec_resources(close_logger=False)
+                    _wait_for_rabbitmq()
+                    self._reconnect_backoff(attempt)
+                    self._sec_consumer = self._create_sec_consumer()
+                    attempt += 1
+                    continue
                 break
-            except MessageMiddlewareDisconnectedError:
+            except (MessageMiddlewareDisconnectedError, MessageMiddlewareMessageError):
                 if not self._running:
                     break
                 logger.error("Conexion perdida con RabbitMQ")
@@ -934,6 +982,9 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                 self._reconnect_backoff(attempt)
                 self._sec_consumer = self._create_sec_consumer()
                 attempt += 1
+            except Exception as e:
+                logger.error(f"Error inesperado en secondary de {self.__class__.__name__}: {e}")
+                break
             finally:
                 if not self._running:
                     self._close_sec_resources()
@@ -1049,6 +1100,7 @@ class WorkerBaseDoubleIO(HealthCheckServer):
 
         self._flush_main_control_buffer()
         self._flush_sec_control_buffer()
+        self.on_main_worker_started()
 
         recovered_eof_global, eof_clients = self.node_logger.recover_eofs()
         for cid, senders in eof_clients.items():
@@ -1157,6 +1209,7 @@ class WorkerBaseDoubleIO(HealthCheckServer):
 
         self._flush_main_control_buffer()
         self._flush_sec_control_buffer()
+        self.on_sec_worker_started()
 
         recovered_eof_global, eof_clients = self.node_logger.recover_eofs()
         for cid, senders in eof_clients.items():

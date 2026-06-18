@@ -4,6 +4,7 @@ RUN pip3 install pika requests
 
 COPY common ./common
 COPY money_converter/money_converter.py .
+COPY money_converter/money_converter_logger.py .
 COPY money_converter/money_converter_api.py .
 COPY money_converter/btc_rates.csv .
 

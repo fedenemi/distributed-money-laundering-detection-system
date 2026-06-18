@@ -205,7 +205,7 @@ class BaseNodeLogger:
 
     def append_to_buffer(self, client_id: Optional[str], buf_key: str, data: dict):
         key = (client_id, buf_key)
-        if key not in self._buffer_fds:
+        if key not in self._buffer_fds or self._buffer_fds[key].closed:
             filepath = self._get_buffer_filepath(client_id, buf_key)
             self._buffer_fds[key] = open(filepath, 'ab')
 
