@@ -3,6 +3,7 @@ import traceback
 import socket
 import threading
 import queue
+import hashlib
 
 from message_handlers import message_handler
 from common import middleware, message_protocol
@@ -37,6 +38,11 @@ def _normalize_bank_id(bank_id):
     return normalized or "0"
 
 
+def _stable_shard(key, total_shards):
+    digest = hashlib.md5(str(key).encode()).hexdigest()
+    return int(digest, 16) % total_shards
+
+
 from common.middleware.middleware_sharded import ShardedExchangeProducer
 
 def _build_output_queue(mom_host, output_queue, output_exchange, output_shards=1):
@@ -54,7 +60,9 @@ def _build_banks_output(mom_host, output_queue, output_exchange, output_shards=1
     raise Exception("FATAL: no output given for data processing")
 
 
-def client_dispatcher(client_id, client_socket, outbox, ack_queue, send_lock):
+def client_dispatcher(client_id, client_socket, outbox, ack_queue, send_lock, input_done_event):
+    input_done_event.wait()
+
     while True:
         try:
             msg_type, payload = outbox.get()
@@ -100,6 +108,7 @@ def handle_client_request(
     checkpoint_lock,
     client_ack_queues,
     client_send_locks,
+    client_input_done_events,
 ):
     handler = message_handler.MessageHandler()
     client_id = None
@@ -107,7 +116,8 @@ def handle_client_request(
     banks_output_shards = int(os.environ.get("BANK_OUTPUT_SHARDS", "1"))
 
     gateway_output_batch_size = int(os.environ.get("GATEWAY_OUTPUT_BATCH_SIZE", "2000"))
-    max_in_flight_batches = int(os.environ.get("MAX_IN_FLIGHT_BATCHES", "3"))
+    max_in_flight_batches = int(os.environ.get("MAX_IN_FLIGHT_BATCHES", "0"))
+    client_outbox_maxsize = int(os.environ.get("CLIENT_OUTBOX_MAXSIZE", "0"))
     output = _build_output_queue(mom_host, output_queue, output_exchange, output_shards)
     banks_output = _build_banks_output(mom_host, banks_out_queue, banks_out_exchange, banks_output_shards)
     sent_bank_ids = set()
@@ -135,15 +145,19 @@ def handle_client_request(
                     client_id = msg_client_id
                     client_sockets[client_id] = client_socket
                     
-                    # Fix del limite de memoria en la cola + Nuevas variables full duplex
-                    client_outboxes[client_id] = queue.Queue(maxsize=50)
+                    client_outboxes[client_id] = queue.Queue(maxsize=client_outbox_maxsize)
                     client_ack_queues[client_id] = queue.Queue()
                     client_send_locks[client_id] = threading.Lock()
-                    client_semaphores[client_id] = threading.Semaphore(max_in_flight_batches)
+                    client_input_done_events[client_id] = threading.Event()
+                    client_semaphores[client_id] = (
+                        threading.Semaphore(max_in_flight_batches)
+                        if max_in_flight_batches > 0
+                        else None
+                    )
 
                     t_disp = threading.Thread(
                         target=client_dispatcher,
-                        args=(client_id, client_socket, client_outboxes[client_id], client_ack_queues[client_id], client_send_locks[client_id])
+                        args=(client_id, client_socket, client_outboxes[client_id], client_ack_queues[client_id], client_send_locks[client_id], client_input_done_events[client_id])
                     )
                     t_disp.daemon = True
                     t_disp.start()
@@ -160,13 +174,20 @@ def handle_client_request(
                     sent_bank_ids.add(bank_id)
                     account_dicts.append({"bank_name": row[0], "bank_id": bank_id})
 
-                # Send bank names over to worker
-                for chunk in _chunks(account_dicts, gateway_output_batch_size):
-                    serialized_message = handler.serialize_rows_message(client_id, chunk)
-                    if isinstance(banks_output, ShardedExchangeProducer):
-                        for shard in range(banks_output_shards):
+                # Send each bank only to the shard that will receive that bank's Q2 result.
+                if isinstance(banks_output, ShardedExchangeProducer):
+                    accounts_by_shard = {shard: [] for shard in range(banks_output_shards)}
+                    for account in account_dicts:
+                        shard = _stable_shard(account["bank_id"], banks_output_shards)
+                        accounts_by_shard[shard].append(account)
+
+                    for shard, shard_accounts in accounts_by_shard.items():
+                        for chunk in _chunks(shard_accounts, gateway_output_batch_size):
+                            serialized_message = handler.serialize_rows_message(client_id, chunk)
                             banks_output.send_to_shard(serialized_message, shard)
-                    else:
+                else:
+                    for chunk in _chunks(account_dicts, gateway_output_batch_size):
+                        serialized_message = handler.serialize_rows_message(client_id, chunk)
                         banks_output.send(serialized_message)
 
                 with client_send_locks[client_id]:
@@ -179,14 +200,19 @@ def handle_client_request(
                     client_id = msg_client_id
                     client_sockets[client_id] = client_socket
                     
-                    client_outboxes[client_id] = queue.Queue(maxsize=50)
+                    client_outboxes[client_id] = queue.Queue(maxsize=client_outbox_maxsize)
                     client_ack_queues[client_id] = queue.Queue()
                     client_send_locks[client_id] = threading.Lock()
-                    client_semaphores[client_id] = threading.Semaphore(max_in_flight_batches)
+                    client_input_done_events[client_id] = threading.Event()
+                    client_semaphores[client_id] = (
+                        threading.Semaphore(max_in_flight_batches)
+                        if max_in_flight_batches > 0
+                        else None
+                    )
 
                     t_disp = threading.Thread(
                         target=client_dispatcher,
-                        args=(client_id, client_socket, client_outboxes[client_id], client_ack_queues[client_id], client_send_locks[client_id])
+                        args=(client_id, client_socket, client_outboxes[client_id], client_ack_queues[client_id], client_send_locks[client_id], client_input_done_events[client_id])
                     )
                     t_disp.daemon = True
                     t_disp.start()
@@ -204,7 +230,9 @@ def handle_client_request(
                 continue
 
             if msg_type == message_protocol.external.MsgType.TRANSACTIONS_BATCH:
-                client_semaphores[client_id].acquire()
+                client_semaphore = client_semaphores.get(client_id)
+                if client_semaphore is not None:
+                    client_semaphore.acquire()
 
                 if output is None:
                     output = _build_output_queue(mom_host, output_queue, output_exchange)
@@ -218,20 +246,21 @@ def handle_client_request(
                     else:
                         output.send(serialized_message)
 
-                with checkpoint_lock:
-                    current_checkpoint = client_checkpoints.get(client_id, 0) + 1
-                    client_checkpoints[client_id] = current_checkpoint
-                    checkpoint_barriers[(client_id, current_checkpoint)] = set()
+                if client_semaphore is not None:
+                    with checkpoint_lock:
+                        current_checkpoint = client_checkpoints.get(client_id, 0) + 1
+                        client_checkpoints[client_id] = current_checkpoint
+                        checkpoint_barriers[(client_id, current_checkpoint)] = set()
 
-                checkpoint_msg = handler.serialize_checkpoint_message(
-                    client_id,
-                    current_checkpoint
-                )
+                    checkpoint_msg = handler.serialize_checkpoint_message(
+                        client_id,
+                        current_checkpoint
+                    )
 
-                if isinstance(output, ShardedExchangeProducer):
-                    output.send_eof_to_all(checkpoint_msg)
-                else:
-                    output.send(checkpoint_msg)
+                    if isinstance(output, ShardedExchangeProducer):
+                        output.send_eof_to_all(checkpoint_msg)
+                    else:
+                        output.send(checkpoint_msg)
                 
                 with client_send_locks[client_id]:
                     message_protocol.external.send_msg(client_socket, message_protocol.external.MsgType.ACK, client_id)
@@ -245,14 +274,19 @@ def handle_client_request(
                     client_id = msg_client_id
                     client_sockets[client_id] = client_socket
                     
-                    client_outboxes[client_id] = queue.Queue(maxsize=50)
+                    client_outboxes[client_id] = queue.Queue(maxsize=client_outbox_maxsize)
                     client_ack_queues[client_id] = queue.Queue()
                     client_send_locks[client_id] = threading.Lock()
-                    client_semaphores[client_id] = threading.Semaphore(max_in_flight_batches)
+                    client_input_done_events[client_id] = threading.Event()
+                    client_semaphores[client_id] = (
+                        threading.Semaphore(max_in_flight_batches)
+                        if max_in_flight_batches > 0
+                        else None
+                    )
                     
                     t_disp = threading.Thread(
                         target=client_dispatcher,
-                        args=(client_id, client_socket, client_outboxes[client_id], client_ack_queues[client_id], client_send_locks[client_id])
+                        args=(client_id, client_socket, client_outboxes[client_id], client_ack_queues[client_id], client_send_locks[client_id], client_input_done_events[client_id])
                     )
                     t_disp.daemon = True
                     t_disp.start()
@@ -268,6 +302,7 @@ def handle_client_request(
 
                 with client_send_locks[client_id]:
                     message_protocol.external.send_msg(client_socket, message_protocol.external.MsgType.ACK, client_id)
+                client_input_done_events[client_id].set()
 
                 continue
 

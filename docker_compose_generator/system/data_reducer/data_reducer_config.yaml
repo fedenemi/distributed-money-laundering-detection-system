@@ -6,5 +6,6 @@ depends_on:
     condition: service_healthy
 environment:
 - RABBITMQ_HOST=rabbitmq
+- BATCH_SIZE=5000
 volumes:
 - ./worker_logs:/worker_logs

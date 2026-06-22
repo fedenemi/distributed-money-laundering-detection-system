@@ -34,7 +34,9 @@ class MoneyConverter(WorkerBaseDoubleIO):
         self._persistent_state_loaded = False
         self._processed_row_ids = set()
         self._main_row_to_mark = None
+        self._main_pending_rows_to_mark = []
         self._main_state_dirty = False
+        self._main_batch_state_dirty = False
         self._sec_state_dirty = False
 
     def supports_partial_batch_resume(self) -> bool:
@@ -47,16 +49,23 @@ class MoneyConverter(WorkerBaseDoubleIO):
         self._recover_persistent_state()
 
     def on_main_batch_complete(self):
-        return
+        if self._main_batch_state_dirty:
+            self._save_persistent_state()
+        self._mark_rows_processed(self._main_pending_rows_to_mark)
+        self._flush_all_main_buffer()
+        self._main_pending_rows_to_mark = []
+        self._main_batch_state_dirty = False
 
     def on_sec_batch_complete(self):
         return
 
     def on_main_row_complete(self):
-        if self._main_state_dirty:
-            self._save_persistent_state()
         if self._main_row_to_mark is not None:
-            self._mark_row_processed(self._main_row_to_mark)
+            if self._main_state_dirty:
+                self._main_pending_rows_to_mark.append(self._main_row_to_mark)
+                self._main_batch_state_dirty = True
+            else:
+                self._mark_row_processed(self._main_row_to_mark)
         self._main_row_to_mark = None
         self._main_state_dirty = False
 
@@ -79,6 +88,18 @@ class MoneyConverter(WorkerBaseDoubleIO):
             return
         self._processed_row_ids.add(row_id)
         self._state_logger().append_processed_row_id(row_id)
+
+    def _mark_rows_processed(self, row_ids):
+        new_row_ids = [
+            row_id
+            for row_id in row_ids
+            if row_id is not None and row_id not in self._processed_row_ids
+        ]
+        if not new_row_ids:
+            return
+
+        self._processed_row_ids.update(new_row_ids)
+        self._state_logger().append_processed_row_ids(new_row_ids)
 
     def _normalize_pending(self, pending):
         return MoneyConverterLogger.normalize_pending(pending)

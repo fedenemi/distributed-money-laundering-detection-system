@@ -50,6 +50,7 @@ def main():
     client_semaphores = {}
     client_ack_queues = {}
     client_send_locks = {}
+    client_input_done_events = {}
     checkpoint_barriers = {}
     checkpoint_lock = threading.Lock()
 
@@ -107,6 +108,7 @@ def main():
                     checkpoint_lock,
                     client_ack_queues,
                     client_send_locks,
+                    client_input_done_events,
                 ),
             )
 

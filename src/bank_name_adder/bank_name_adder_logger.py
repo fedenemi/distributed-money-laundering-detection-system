@@ -11,6 +11,7 @@ class BankNameAdderLogger:
         worker_dir = os.path.join(base_logs_dir, worker_name)
         os.makedirs(worker_dir, exist_ok=True)
         self.state_filepath = os.path.join(worker_dir, "bank_name_adder_state.json")
+        self.cache_filepath = os.path.join(worker_dir, "bank_name_adder_cache.log")
         self.processed_filepath = os.path.join(worker_dir, "bank_name_adder_processed.log")
 
     def _write_record(self, file, data: dict, sync: bool = True):
@@ -71,6 +72,7 @@ class BankNameAdderLogger:
             return {}, {}, set()
 
         cache = dict(state.get("cache", {}))
+        cache.update(self.recover_cache())
         pending = {
             bank_id: self.normalize_pending(rows_by_id)
             for bank_id, rows_by_id in state.get("pending", {}).items()
@@ -81,6 +83,22 @@ class BankNameAdderLogger:
         self.append_processed_row_ids(missing_legacy_ids)
         processed_row_ids.update(legacy_processed_row_ids)
         return cache, pending, processed_row_ids
+
+    def recover_cache(self) -> dict:
+        cache = {}
+        for record in self._read_records(self.cache_filepath) or []:
+            entries = record.get("entries", {})
+            if isinstance(entries, dict):
+                cache.update({str(bank_id): bank_name for bank_id, bank_name in entries.items()})
+        return cache
+
+    def append_cache_entries(self, entries: dict):
+        if not entries:
+            return
+
+        normalized_entries = {str(bank_id): bank_name for bank_id, bank_name in entries.items()}
+        with open(self.cache_filepath, "ab") as file:
+            self._write_record(file, {"entries": normalized_entries}, sync=True)
 
     def recover_processed_row_ids(self) -> set[str]:
         processed_row_ids = set()
@@ -106,6 +124,9 @@ class BankNameAdderLogger:
             os.fsync(file.fileno())
 
     def save_state(self, cache: dict, pending: dict):
+        self.save_pending(pending)
+
+    def save_pending(self, pending: dict):
         tmp_path = f"{self.state_filepath}.{os.getpid()}.tmp"
         normalized_pending = {
             bank_id: self.normalize_pending(rows_by_id)
@@ -115,7 +136,6 @@ class BankNameAdderLogger:
         with open(tmp_path, "w", encoding="utf-8") as file:
             json.dump(
                 {
-                    "cache": dict(cache),
                     "pending": normalized_pending,
                 },
                 file,

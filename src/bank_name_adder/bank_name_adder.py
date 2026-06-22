@@ -20,6 +20,7 @@ class BankNameAdder(WorkerBaseDoubleIO):
         self._processed_row_ids = set()
         self._main_row_to_mark = None
         self._main_rows_to_mark = []
+        self._sec_cache_updates = {}
         self._main_state_dirty = False
         self._sec_state_dirty = False
 
@@ -49,9 +50,12 @@ class BankNameAdder(WorkerBaseDoubleIO):
         return
 
     def on_sec_batch_complete(self):
+        if self._sec_cache_updates:
+            self._state_logger().append_cache_entries(self._sec_cache_updates)
         if self._sec_state_dirty:
             self._save_persistent_state()
         self._flush_all_sec_buffer()
+        self._sec_cache_updates = {}
         self._sec_state_dirty = False
 
     def _state_logger(self) -> BankNameAdderLogger:
@@ -119,7 +123,7 @@ class BankNameAdder(WorkerBaseDoubleIO):
                 for bank_id, rows_by_id in dict(self._shared_pending).items()
             }
 
-        self._state_logger().save_state(cache, pending)
+        self._state_logger().save_pending(pending)
 
     def process_main_input(self, data: dict) -> tuple[list, list]:
         self._main_row_to_mark = None
@@ -155,11 +159,12 @@ class BankNameAdder(WorkerBaseDoubleIO):
         # Get shared lock for shared elements
         with self._shared_lock:
             self._shared_cache[bank_id] = bank_name
-            self._sec_state_dirty = True
+            self._sec_cache_updates[bank_id] = bank_name
 
             # Send elements if there are any pending name changes
             if bank_id in self._shared_pending:
                 pending_rows = self._normalize_pending(self._shared_pending.pop(bank_id))
+                self._sec_state_dirty = True
                 for msg in pending_rows.values():
                     msg["Bank Name"] = bank_name
                     resolved_messages.append(msg)
