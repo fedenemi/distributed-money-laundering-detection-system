@@ -1098,6 +1098,8 @@ class WorkerBaseDoubleIO(HealthCheckServer):
             elif raw_buf_key == "control_sec":
                 self._sec_control_buffer.extend(msgs)
 
+        self._flush_all_main_buffer()
+        self._flush_all_sec_buffer()
         self._flush_main_control_buffer()
         self._flush_sec_control_buffer()
         self.on_main_worker_started()
@@ -1207,6 +1209,8 @@ class WorkerBaseDoubleIO(HealthCheckServer):
             elif raw_buf_key == "control_sec":
                 self._sec_control_buffer.extend(msgs)
 
+        self._flush_all_main_buffer()
+        self._flush_all_sec_buffer()
         self._flush_main_control_buffer()
         self._flush_sec_control_buffer()
         self.on_sec_worker_started()

@@ -200,6 +200,7 @@ def generate_system_docker_compose(total_clients=0):
         )
         for name, config in q2_aggregators.items():
             config["environment"].append("BATCH_SIZE=5000")
+            config["environment"].append("ROUTING_FIELD=From Bank")
             config["environment"].append(f"OUTPUT_SHARDS={q2_bank_names_adder_instances}")
         system = system | q2_aggregators
 
@@ -442,7 +443,7 @@ def generate_system_docker_compose(total_clients=0):
             sec_output_shards=q5_filter_lt_1_usd_instances,
         )
         for name, config in q5_money_converters.items():
-            config["environment"].append("BATCH_SIZE=1")
+            config["environment"].append("BATCH_SIZE=1000")
             config["environment"].append("SEC_BATCH_SIZE=5000")
         system = system | q5_money_converters
 

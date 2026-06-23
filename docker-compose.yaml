@@ -50,12 +50,12 @@ services:
     - PYTHONUNBUFFERED=1
     - SERVER_HOST=gateway
     - SERVER_PORT=7659
-    - GATEWAY_OUTPUT_BATCH_SIZE=10000
+    - GATEWAY_OUTPUT_BATCH_SIZE=5000
     - OUTPUT_EXCHANGE=gateway_exc
     - BANK_OUTPUT_EXCHANGE=q2_banks_exchange
     - INPUT_QUEUE_PREFIX=results
     - TOTAL_QUERIES=5
-    - MAX_IN_FLIGHT_BATCHES=1200
+    - MAX_IN_FLIGHT_BATCHES=0
     - OUTPUT_SHARDS=2
     - BANK_OUTPUT_SHARDS=2
     - QUERY_1_N_UPSTREAM=2
@@ -143,6 +143,7 @@ services:
         condition: service_completed_successfully
     environment:
     - RABBITMQ_HOST=rabbitmq
+    - BATCH_SIZE=5000
     - N_UPSTREAM=2
     - INPUT_EXCHANGE=usd_transactions_exc
     - CONSUMER_GROUP=q1_data_reducer
@@ -165,6 +166,7 @@ services:
         condition: service_completed_successfully
     environment:
     - RABBITMQ_HOST=rabbitmq
+    - BATCH_SIZE=5000
     - N_UPSTREAM=2
     - INPUT_EXCHANGE=usd_transactions_exc
     - CONSUMER_GROUP=q1_data_reducer
@@ -187,6 +189,7 @@ services:
         condition: service_completed_successfully
     environment:
     - RABBITMQ_HOST=rabbitmq
+    - BATCH_SIZE=5000
     - N_UPSTREAM=2
     - INPUT_EXCHANGE=usd_transactions_exc
     - CONSUMER_GROUP=q1_data_reducer
@@ -271,6 +274,7 @@ services:
     - CARRY_FIELDS=Account
     - TOTAL_CLIENTS=1
     - BATCH_SIZE=5000
+    - ROUTING_FIELD=From Bank
     - OUTPUT_SHARDS=2
     volumes:
     - ./worker_logs:/worker_logs
@@ -298,6 +302,7 @@ services:
     - CARRY_FIELDS=Account
     - TOTAL_CLIENTS=1
     - BATCH_SIZE=5000
+    - ROUTING_FIELD=From Bank
     - OUTPUT_SHARDS=2
     volumes:
     - ./worker_logs:/worker_logs
@@ -315,6 +320,8 @@ services:
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
     - OP_MODE=PIPELINE
+    - BATCH_SIZE=5000
+    - SEC_BATCH_SIZE=5000
     - MAIN_INPUT_EXCHANGE=q2_results_formatter
     - CONSUMER_GROUP=q2_banks_name_adder
     - SHARD_ID=0
@@ -341,6 +348,8 @@ services:
     - MOM_HOST=rabbitmq
     - PYTHONUNBUFFERED=1
     - OP_MODE=PIPELINE
+    - BATCH_SIZE=5000
+    - SEC_BATCH_SIZE=5000
     - MAIN_INPUT_EXCHANGE=q2_results_formatter
     - CONSUMER_GROUP=q2_banks_name_adder
     - SHARD_ID=1
@@ -365,6 +374,7 @@ services:
         condition: service_completed_successfully
     environment:
     - RABBITMQ_HOST=rabbitmq
+    - BATCH_SIZE=5000
     - N_UPSTREAM=3
     - INPUT_EXCHANGE=q2_by_bank_exc
     - CONSUMER_GROUP=q2_data_reducer
@@ -388,6 +398,7 @@ services:
         condition: service_completed_successfully
     environment:
     - RABBITMQ_HOST=rabbitmq
+    - BATCH_SIZE=5000
     - N_UPSTREAM=3
     - INPUT_EXCHANGE=q2_by_bank_exc
     - CONSUMER_GROUP=q2_data_reducer
@@ -642,6 +653,7 @@ services:
         condition: service_completed_successfully
     environment:
     - RABBITMQ_HOST=rabbitmq
+    - BATCH_SIZE=5000
     - N_UPSTREAM=2
     - INPUT_EXCHANGE=usd_transactions_exc
     - CONSUMER_GROUP=q3_data_reducer
@@ -663,6 +675,7 @@ services:
         condition: service_completed_successfully
     environment:
     - RABBITMQ_HOST=rabbitmq
+    - BATCH_SIZE=5000
     - N_UPSTREAM=2
     - INPUT_EXCHANGE=usd_transactions_exc
     - CONSUMER_GROUP=q3_data_reducer
@@ -684,6 +697,7 @@ services:
         condition: service_completed_successfully
     environment:
     - RABBITMQ_HOST=rabbitmq
+    - BATCH_SIZE=5000
     - N_UPSTREAM=2
     - INPUT_EXCHANGE=usd_transactions_exc
     - CONSUMER_GROUP=q3_data_reducer
@@ -927,6 +941,7 @@ services:
         condition: service_completed_successfully
     environment:
     - RABBITMQ_HOST=rabbitmq
+    - BATCH_SIZE=5000
     - N_UPSTREAM=2
     - INPUT_EXCHANGE=usd_transactions_exc
     - CONSUMER_GROUP=q4_data_reducer
@@ -948,6 +963,7 @@ services:
         condition: service_completed_successfully
     environment:
     - RABBITMQ_HOST=rabbitmq
+    - BATCH_SIZE=5000
     - N_UPSTREAM=2
     - INPUT_EXCHANGE=usd_transactions_exc
     - CONSUMER_GROUP=q4_data_reducer
@@ -969,6 +985,7 @@ services:
         condition: service_completed_successfully
     environment:
     - RABBITMQ_HOST=rabbitmq
+    - BATCH_SIZE=5000
     - N_UPSTREAM=2
     - INPUT_EXCHANGE=usd_transactions_exc
     - CONSUMER_GROUP=q4_data_reducer
@@ -1588,6 +1605,7 @@ services:
         condition: service_completed_successfully
     environment:
     - RABBITMQ_HOST=rabbitmq
+    - BATCH_SIZE=5000
     - N_UPSTREAM=1
     - INPUT_EXCHANGE=gateway_exc
     - CONSUMER_GROUP=q5_data_reducer
@@ -1609,6 +1627,7 @@ services:
         condition: service_completed_successfully
     environment:
     - RABBITMQ_HOST=rabbitmq
+    - BATCH_SIZE=5000
     - N_UPSTREAM=1
     - INPUT_EXCHANGE=gateway_exc
     - CONSUMER_GROUP=q5_data_reducer
@@ -1789,7 +1808,7 @@ services:
     - MAIN_EOF_DEST=MAIN
     - SEC_EOF_DEST=SECONDARY
     - TARGET_CURRENCY=US Dollar
-    - BATCH_SIZE=1
+    - BATCH_SIZE=1000
     - SEC_BATCH_SIZE=5000
     volumes:
     - ./worker_logs:/worker_logs
@@ -1820,7 +1839,7 @@ services:
     - MAIN_EOF_DEST=MAIN
     - SEC_EOF_DEST=SECONDARY
     - TARGET_CURRENCY=US Dollar
-    - BATCH_SIZE=1
+    - BATCH_SIZE=1000
     - SEC_BATCH_SIZE=5000
     volumes:
     - ./worker_logs:/worker_logs
@@ -1851,7 +1870,7 @@ services:
     - MAIN_EOF_DEST=MAIN
     - SEC_EOF_DEST=SECONDARY
     - TARGET_CURRENCY=US Dollar
-    - BATCH_SIZE=1
+    - BATCH_SIZE=1000
     - SEC_BATCH_SIZE=5000
     volumes:
     - ./worker_logs:/worker_logs
