@@ -491,6 +491,7 @@ def generate_system_docker_compose(total_clients=0):
 
                 # --- MONITOR Y CHAOS MONKEY ---
         worker_names = [name for name in system.keys() if name not in ["rabbitmq","gateway"]]
+        worker_names.extend(["monitor_0", "monitor_1", "monitor_2"])
         system = system | _get_monitor_services(worker_names)
         system = system | _get_chaos_monkey_service()
 
@@ -501,10 +502,13 @@ def _get_monitor_services(worker_names):
     workers_value = ",".join(name for name in worker_names if name.lower() not in ["rabbitmq","gateway"])
     return {
         "monitor_0": {
-            "build": {"context": "./src/monitor"},
+            "container_name": "monitor_0",
+            "build": {"context": "./src",
+        "dockerfile": "monitor/Dockerfile"},
             "depends_on": {"rabbitmq": {"condition": "service_healthy"}},
             "restart": "unless-stopped",
             "environment": [
+                "PYTHONPATH=/app",
                 "MONITOR_ID=0",
                 "SUCCESSORS=monitor_1,monitor_2",
                 "HEALTH_PORT=8888",
@@ -517,10 +521,13 @@ def _get_monitor_services(worker_names):
             "restart": "unless-stopped",
         },
         "monitor_1": {
-            "build": {"context": "./src/monitor"},
+            "container_name": "monitor_1",
+            "build": {"context": "./src",
+        "dockerfile": "monitor/Dockerfile"},
             "depends_on": {"rabbitmq": {"condition": "service_healthy"}},
             "restart": "unless-stopped",
             "environment": [
+                "PYTHONPATH=/app",
                 "MONITOR_ID=1",
                 "SUCCESSORS=monitor_2,monitor_0",
                 "HEALTH_PORT=8888",
@@ -533,10 +540,13 @@ def _get_monitor_services(worker_names):
             "restart": "unless-stopped",
         },
         "monitor_2": {
-            "build": {"context": "./src/monitor"},
+            "container_name": "monitor_2",
+            "build": {"context": "./src",
+        "dockerfile": "monitor/Dockerfile"},
             "depends_on": {"rabbitmq": {"condition": "service_healthy"}},
             "restart": "unless-stopped",
             "environment": [
+                "PYTHONPATH=/app",
                 "MONITOR_ID=2",
                 "SUCCESSORS=monitor_0,monitor_1",
                 "HEALTH_PORT=8888",
@@ -553,13 +563,13 @@ def _get_monitor_services(worker_names):
 def _get_chaos_monkey_service():
     return {
         "chaos_monkey": {
-            "build": {"context": "./scripts"},
+            "build": {"context": "./scripts", "dockerfile": "Dockerfile"},
             "environment": [
                 "CHAOS_TARGETS=usd_filter_0,q1_data_reducer_0,q2_aggregator_0,q2_banks_name_adder_0,q3_avg_and_transactions_joiner_0,q4_inc_edges_filter_0,q4_paths_creators_0,q5_money_converter_0",
                 "CHAOS_INTERVAL=30",
                 "CHAOS_MIN_WAIT=30",
             ],
-            "volumes": ["/var/run/docker.sock:/var/run/docker.sock"],
+            "volumes": ["/var/run/docker.sock:/var/run/docker.sock", "./docker-compose.yaml:/app/docker-compose.yaml", "./scripts/chaos_monkey.yaml:/app/scripts/chaos_monkey.yaml"],
             "profiles": ["chaos"],
         }
     }

@@ -5,6 +5,7 @@ import signal
 import socket
 import time
 import threading
+from common.health.health_server import HealthCheckServer
 
 from ring_election import RingElection
 
@@ -69,12 +70,13 @@ def _check_all():
                 _restart(worker)
 
 
-class Monitor:
+class Monitor(HealthCheckServer):
     def __init__(self):
         self.ring     = RingElection(MONITOR_ID, SUCCESSORS)
         self.running  = True
 
     def run(self):
+        self.start_health_server()
         threading.Thread(target=self.ring.run, daemon=True).start()
         signal.signal(signal.SIGTERM, self._stop)
         signal.signal(signal.SIGINT, self._stop)
