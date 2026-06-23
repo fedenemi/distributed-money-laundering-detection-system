@@ -215,6 +215,13 @@ class WorkerBase(HealthCheckServer):
         if not records:
             return
 
+        # Clear disk buffer
+        clients_in_batch = {self._outbox_client_id(record) for record in records}
+        for cid in clients_in_batch:
+            if hasattr(self, "node_logger"):
+                self.node_logger.clear_buffer(cid, buf_key)
+
+        # Send elements
         if buf_key == "__control__":
             self._flush_control_records(records)
         else:
@@ -224,11 +231,6 @@ class WorkerBase(HealthCheckServer):
             })
 
             self._send_body(buf_key, body)
-
-        clients_in_batch = {self._outbox_client_id(record) for record in records}
-        for cid in clients_in_batch:
-            if hasattr(self, "node_logger"):
-                self.node_logger.clear_buffer(cid, buf_key)
 
     def _send_body(self, buf_key: str, body: bytes):
         try:
