@@ -1,6 +1,5 @@
 enabled: true
 compose_file: docker-compose.yaml
-project_name: "money-laundering-analysis-tp"
 
 # Acciones disponibles:
 # - restart: docker compose restart <servicio>
@@ -11,7 +10,7 @@ project_name: "money-laundering-analysis-tp"
 
 action: kill
 
-initial_delay_seconds: 120
+initial_delay_seconds: 10
 interval_seconds: [30, 90]
 downtime_seconds: [5, 20]
 max_events: 3
@@ -25,21 +24,21 @@ allowed_patterns:
   - "^usd_filter_"
   - "^q[1-5]_filter_"
   - "^q[1-5]_data_reducer_"
-  - "^q[1-5]_splitter"
-  - "^q[1-5]_aggregator"
-  - "^q2_splitter_by_bank_"
-  - "^q2_banks_name_adder_"
-  - "^q3_avg_aggregators_"
-  - "^q3_avg_and_transactions_joiner_"
+
+  # Aggregator generico con estado persistido.
+  - "^q2_aggregator_"
   - "^q3_avg_aggregators_preceding_period_"
-  - "^q3_splitter_by_payment_method_"
   - "^q5_counter_"
-  - "^q5_money_converter_"
   - "^q5_transaction_counter_"
-  - "^q4_transaction_graph_"
-  - "^q4_paths_creators_"
-  - "^q4_paths_splitters_"
-  - "^q4_unique_paths_counters_"
+
+  # Splitters sin estado propio complejo.
+  - "^q2_splitter_by_bank_"
+  - "^q3_splitter_by_payment_method_"
+
+  # Double IO con persistencia propia.
+  - "^q2_banks_name_adder_"
+  - "^q3_avg_and_transactions_joiner_"
+  - "^q5_money_converter_"
   - "^monitor_"
 
 # Servicios criticos que no queremos detener por defecto.
