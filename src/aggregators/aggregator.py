@@ -134,6 +134,10 @@ class Aggregator(WorkerBase):
             for k, acc in cstate.items():
                 yield self._build_result(k, acc, client_id)
 
+    def on_clean_client_data(self, client_id=None):
+        if client_id is not None:
+            pass
+
     def _build_result(self, key, acc, client_id):
         result = {}
         if self.key_field:

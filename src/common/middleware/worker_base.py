@@ -170,6 +170,9 @@ class WorkerBase(HealthCheckServer):
     def on_eof_complete(self, client_id=None):
         pass
 
+    def on_clean_client_data(self, client_id=None):
+        pass
+
     def _routing_key(self, msg: dict) -> str:
         if self.output_exchange and self.output_shards >= 1:
             routing_field = os.environ.get("ROUTING_FIELD")
@@ -363,6 +366,7 @@ class WorkerBase(HealthCheckServer):
         
         eof_global_senders = self.eof_global_senders
         eof_client_senders = self.eof_client_senders
+        clean_data_senders = self.clean_data_senders
         done_clients = set()
         
         checkpoint_senders = {}
@@ -466,6 +470,22 @@ class WorkerBase(HealthCheckServer):
                             del eof_client_senders[client_id]
 
                     ack()
+                    return
+
+                elif msg.get("type") == "clean":
+                    logger.info(f"Comando para limpiar datos de cliente {client_id} recibido")
+                    client_id = msg.get("client_id")
+
+                    if client_id is not None:
+                        clean_data_senders.setdefault(client_id, set())
+                        clean_data_senders[client_id].add(sender_id)
+                        current_clean_data_senders = len(clean_data_senders[client_id])
+
+                        if current_clean_data_senders >= self.n_upstream:
+                            self.on_clean_client_data(client_id)
+                            del clean_data_senders[client_id]
+                            logger.info(f"Datos de cliente {client_id} limpiados")
+
                     return
 
                 is_resuming = self.supports_partial_batch_resume() and (msg_hash == self.pending_batch_id)

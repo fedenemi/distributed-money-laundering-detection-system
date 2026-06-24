@@ -95,9 +95,11 @@ def handle_client_request(
     gateway_output_batch_size = int(os.environ.get("GATEWAY_OUTPUT_BATCH_SIZE", "2000"))
     max_in_flight_batches = int(os.environ.get("MAX_IN_FLIGHT_BATCHES", "0"))
     client_outbox_maxsize = int(os.environ.get("CLIENT_OUTBOX_MAXSIZE", "0"))
-    
+    client_data_rx_timeout = int(os.environ.get("CLIENT_DATA_RX_TIMEOUT", "30"))
+
     output = _build_output_queue(mom_host, output_queue, output_exchange, output_shards)
     accounts_output = _build_output_queue(mom_host, None, accounts_out_exchange, accounts_out_shards)
+    client_socket.settimeout(client_data_rx_timeout)
 
     try:
         client_socket.setblocking(True)
@@ -257,7 +259,20 @@ def handle_client_request(
                 continue
 
             raise TypeError(f"Unexpected message type: {msg_type}")
-            
+
+    except TimeoutError as e:
+        logging.info(f"Cliente {client_id} desconectado por timeout. Limpiando datos...")
+        serialized_message = handler.serialize_clean_client_data(client_id)
+
+        # Send clean client to accounts input
+        accounts_output.send_eof_to_all(serialized_eof)
+
+        # Send clean client to transactions input
+        if isinstance(output, ShardedExchangeProducer):
+            output.send_eof_to_all(serialized_message)
+        else:
+            output.send(serialized_message)
+
     except Exception as e:
         error_name = type(e).__name__
         if error_name == 'IncompleteReadError' and getattr(e, 'partial', None) == b'':
