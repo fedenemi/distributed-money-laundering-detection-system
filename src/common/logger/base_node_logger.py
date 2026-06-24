@@ -67,21 +67,21 @@ class BaseNodeLogger:
                 except json.JSONDecodeError:
                     break
 
-    def save_batch_state(self, batch_id: Optional[str], index: int, last_completed: Optional[str] = None):
+    def save_batch_state(self, batch_id: Optional[str], index: int, last_completed: Optional[str] = None, buffer_sizes: dict = None):
         tmp_path = self.batch_state_filepath + ".tmp"
         with open(tmp_path, "w") as f:
-            json.dump({"batch_id": batch_id, "index": index, "last_completed": last_completed}, f)
+            json.dump({"batch_id": batch_id, "index": index, "last_completed": last_completed, "buffer_sizes": buffer_sizes or {}}, f)
         os.replace(tmp_path, self.batch_state_filepath)
 
-    def recover_batch_state(self) -> Tuple[Optional[str], int, Optional[str]]:
+    def recover_batch_state(self) -> Tuple[Optional[str], int, Optional[str], dict]:
         if not os.path.exists(self.batch_state_filepath):
-            return None, 0, None
+            return None, 0, None, {}
         try:
             with open(self.batch_state_filepath, "r") as f:
                 state = json.load(f)
-                return state.get("batch_id"), state.get("index", 0), state.get("last_completed")
+                return state.get("batch_id"), state.get("index", 0), state.get("last_completed"), state.get("buffer_sizes", {})
         except (json.JSONDecodeError, IOError):
-            return None, 0, None
+            return None, 0, None, {}
 
     def log_eof(self, client_id: Optional[str], emitter_id: str):
         self._write_in_file(self._eof_fd, {
@@ -254,3 +254,26 @@ class BaseNodeLogger:
         for fd in self._buffer_fds.values():
             if not fd.closed:
                 fd.close()
+
+    def append_bulk_to_buffer(self, client_id: Optional[str], buf_key: str, data_list: list):
+        if not data_list:
+            return
+        
+        key = (client_id, buf_key)
+        if key not in self._buffer_fds or self._buffer_fds[key].closed:
+            filepath = self._get_buffer_filepath(client_id, buf_key)
+            self._buffer_fds[key] = open(filepath, 'ab')
+            
+        fd = self._buffer_fds[key]
+        final_bytes = bytearray()
+        
+        for data in data_list:
+            payload = json.dumps(data).encode('utf-8')
+            longitud = len(payload).to_bytes(4, "big")
+            checksum = zlib.crc32(payload).to_bytes(4, "big")
+            final_bytes.extend(longitud)
+            final_bytes.extend(payload)
+            final_bytes.extend(checksum)
+            
+        fd.write(final_bytes)
+        fd.flush()

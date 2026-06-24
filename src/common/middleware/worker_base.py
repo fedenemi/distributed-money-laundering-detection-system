@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 RABBITMQ_HOST = os.environ.get("RABBITMQ_HOST", "rabbitmq")
 RECONNECT_DELAY = 2
 RECONNECT_MAX_DELAY = 30
+PARTIAL_BATCH_CHECKPOINT_TOTAL = 500
 
 
 def _wait_for_rabbitmq():
@@ -67,11 +68,14 @@ class WorkerBase(HealthCheckServer):
 
         (self.pending_batch_id, 
          self.processed_tx_count, 
-         self.last_completed_batch) = self.node_logger.recover_batch_state()
+         self.last_completed_batch,
+         self.saved_buffer_sizes) = self.node_logger.recover_batch_state()
 
         recovered_buffers = self.node_logger.load_all_buffers()
         for (client_id, buf_key), msgs in recovered_buffers.items():
             self._buffer.setdefault(buf_key, []).extend(msgs)
+
+        self._reconcile_state()
 
         self.eof_global_senders, self.eof_client_senders = self.node_logger.recover_eofs()
         self.completed_eofs = self.node_logger.recover_eof_done()
@@ -121,6 +125,22 @@ class WorkerBase(HealthCheckServer):
         delay = min(RECONNECT_DELAY * (2 ** attempt), RECONNECT_MAX_DELAY)
         logger.info(f"Reintentando conexion en {delay}s...")
         time.sleep(delay)
+
+    def _reconcile_state(self):
+        if not self.pending_batch_id:
+            return
+
+        for buf_key, msgs in self._buffer.items():
+            expected_size = self.saved_buffer_sizes.get(buf_key, 0)
+            real_size = len(msgs)
+
+            if real_size > expected_size:
+                orphans = real_size - expected_size
+                logger.warning(
+                    f"Reconciliación: Truncando {orphans} registros huérfanos en '{buf_key}'. "
+                    f"Estado seguro: {expected_size}. Encontrados: {real_size}."
+                )
+                self._buffer[buf_key] = msgs[:expected_size]
 
     def _handle_sigterm(self, *_):
         logger.info("SIGTERM recibido -> cerrando")
@@ -177,21 +197,39 @@ class WorkerBase(HealthCheckServer):
     def _emit(self, results: list):
         if not results or self._producer is None:
             return
+
+        bulk_data = {}
+        client_id = self._outbox_client_id(results[0])
         for msg in results:
             buf_key = self._buffer_key(msg)
-            client_id = self._outbox_client_id(msg)
+            bulk_data.setdefault(buf_key, []).append(msg)
 
-            self._buffer.setdefault(buf_key, []).append(msg)
-            self.node_logger.append_to_buffer(client_id, buf_key, msg)
-            
-            if len(self._buffer[buf_key]) >= self.batch_size:
-                self._flush_key(buf_key)
+        for buf_key, msgs in bulk_data.items():
+            if hasattr(self, "node_logger"):
+                self.node_logger.append_bulk_to_buffer(client_id, buf_key, msgs)
+
+            for i, msg in enumerate(msgs):
+                self._buffer.setdefault(buf_key, []).append(msg)
+                
+                if len(self._buffer[buf_key]) >= self.batch_size:
+                    self._flush_key(buf_key)
+
+                    remainder = msgs[i+1:]
+                    if remainder and hasattr(self, "node_logger"):
+                        self.node_logger.append_bulk_to_buffer(client_id, buf_key, remainder)
 
     def _flush_key(self, buf_key: str):
         records = self._buffer.pop(buf_key, [])
         if not records:
             return
 
+        # Clear disk buffer
+        clients_in_batch = {self._outbox_client_id(record) for record in records}
+        for cid in clients_in_batch:
+            if hasattr(self, "node_logger"):
+                self.node_logger.clear_buffer(cid, buf_key)
+
+        # Send elements
         if buf_key == "__control__":
             self._flush_control_records(records)
         else:
@@ -201,11 +239,6 @@ class WorkerBase(HealthCheckServer):
             })
 
             self._send_body(buf_key, body)
-
-        clients_in_batch = {self._outbox_client_id(record) for record in records}
-        for cid in clients_in_batch:
-            if hasattr(self, "node_logger"):
-                self.node_logger.clear_buffer(cid, buf_key)
 
     def _send_body(self, buf_key: str, body: bytes):
         try:
@@ -339,6 +372,8 @@ class WorkerBase(HealthCheckServer):
                 logger.info(f"{self.__class__.__name__} recupero EOF completo para client_id={client_id}; ejecutando cierre pendiente")
                 self._finish_eof(client_id)
                 done_clients.add(client_id)
+                if client_id in eof_client_senders:
+                    del eof_client_senders[client_id]
 
         def on_message(body: bytes, ack, nack):
             try:
@@ -413,6 +448,8 @@ class WorkerBase(HealthCheckServer):
                         if len(eof_client_senders[client_id]) >= self.n_upstream:
                             self._finish_eof(client_id)
                             done_clients.add(client_id)
+                            if client_id in eof_client_senders:
+                                del eof_client_senders[client_id]
                         ack()
                         return
 
@@ -425,6 +462,8 @@ class WorkerBase(HealthCheckServer):
                     if current_eof_count >= self.n_upstream:
                         self._finish_eof(client_id)
                         done_clients.add(client_id)
+                        if client_id in eof_client_senders:
+                            del eof_client_senders[client_id]
 
                     ack()
                     return
@@ -437,6 +476,7 @@ class WorkerBase(HealthCheckServer):
                     self.pending_batch_id = msg_hash
                     self.processed_tx_count = 0
 
+                chunk_results = []                
                 for i, row in enumerate(rows):
                     if is_resuming and i < self.processed_tx_count:
                         continue
@@ -444,13 +484,24 @@ class WorkerBase(HealthCheckServer):
                     self._current_msg_hash = msg_hash
                     self._current_row_index = i
                     processed_data = self.process(row)
-                    self._emit(processed_data)
+                    
+                    if processed_data:
+                        chunk_results.extend(processed_data)
 
-                    if self.supports_partial_batch_resume() and i % 100 == 0 and i > 0:
-                        self.node_logger.save_batch_state(msg_hash, i, self.last_completed_batch)
+                    is_last_row = (i == len(rows) - 1)
+
+                    if (self.supports_partial_batch_resume() and i % PARTIAL_BATCH_CHECKPOINT_TOTAL == 0 and i > 0) or is_last_row:
+
+                        self._emit(chunk_results)
+
+                        if self.supports_partial_batch_resume() and not is_last_row:
+                            current_sizes = {k: len(v) for k, v in self._buffer.items()}
+                            self.node_logger.save_batch_state(msg_hash, i, self.last_completed_batch, current_sizes)
+
+                        chunk_results.clear()
 
                 self.on_batch_complete(msg_hash)
-                self.node_logger.save_batch_state(None, 0, msg_hash)
+                self.node_logger.save_batch_state(None, 0, msg_hash, {})
                 self.pending_batch_id = None
                 self.processed_tx_count = 0
                 self.last_completed_batch = msg_hash

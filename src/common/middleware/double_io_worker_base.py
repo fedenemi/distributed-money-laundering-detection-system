@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 RABBITMQ_HOST = os.environ.get("RABBITMQ_HOST", "rabbitmq")
 RECONNECT_DELAY = 2
 RECONNECT_MAX_DELAY = 30
+PARTIAL_BATCH_CHECKPOINT_TOTAL = 500
 
 
 def _wait_for_rabbitmq():
@@ -179,6 +180,26 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                 pass
             self._recreate_sec_producer()
 
+    def _reconcile_state(self):
+        if not getattr(self, "pending_batch_id", None):
+            return
+
+        for buf_key, msgs in self._main_out_buffer.items():
+            expected_size = self.saved_buffer_sizes.get(f"out_main_{buf_key}", 0)
+            real_size = len(msgs)
+            if real_size > expected_size:
+                orphans = real_size - expected_size
+                logger.warning(f"Reconciliación: Truncando {orphans} registros en 'out_main_{buf_key}'. Seguro: {expected_size}. Reales: {real_size}.")
+                self._main_out_buffer[buf_key] = msgs[:expected_size]
+
+        for buf_key, msgs in self._sec_out_buffer.items():
+            expected_size = self.saved_buffer_sizes.get(f"out_sec_{buf_key}", 0)
+            real_size = len(msgs)
+            if real_size > expected_size:
+                orphans = real_size - expected_size
+                logger.warning(f"Reconciliación: Truncando {orphans} registros en 'out_sec_{buf_key}'. Seguro: {expected_size}. Reales: {real_size}.")
+                self._sec_out_buffer[buf_key] = msgs[:expected_size]
+
     # --- Para implementar en subclases -------------------------------------------
 
     def process_main_input(self, data: dict) -> tuple[list, list]:
@@ -266,35 +287,65 @@ class WorkerBaseDoubleIO(HealthCheckServer):
     def _emit_main_output(self, results: list):
         if not results or self._main_producer is None:
             return
+
+        bulk_data = {}
+        client_id = results[0].get("client_id") if results else None
+        
         for msg in results:
             real_key = self._buffer_key(msg, self.main_output_exchange, self.main_output_shards)
+            bulk_data.setdefault(real_key, []).append(msg)
+
+        for real_key, msgs in bulk_data.items():
             buf_key_logger = f"out_main_{real_key}"
-            client_id = msg.get("client_id")
-            
-            self._main_out_buffer.setdefault(real_key, []).append(msg)
-            self.node_logger.append_to_buffer(client_id, buf_key_logger, msg)
-            
-            if len(self._main_out_buffer[real_key]) >= self.batch_size:
-                self._flush_main_buffer_key(real_key)
+            if hasattr(self, "node_logger"):
+                self.node_logger.append_bulk_to_buffer(client_id, buf_key_logger, msgs)
+
+            for i, msg in enumerate(msgs):
+                self._main_out_buffer.setdefault(real_key, []).append(msg)
+
+                if len(self._main_out_buffer[real_key]) >= self.batch_size:
+                    self._flush_main_buffer_key(real_key)
+
+                    remainder = msgs[i+1:]
+                    if remainder and hasattr(self, "node_logger"):
+                        self.node_logger.append_bulk_to_buffer(client_id, buf_key_logger, remainder)
 
     def _emit_sec_output(self, results: list):
         if not results or self._sec_producer is None:
             return
+
+        bulk_data = {}
+        client_id = results[0].get("client_id") if results else None
+
         for msg in results:
             real_key = self._buffer_key(msg, self.sec_output_exchange, self.sec_output_shards)
+            bulk_data.setdefault(real_key, []).append(msg)
+
+        for real_key, msgs in bulk_data.items():
             buf_key_logger = f"out_sec_{real_key}"
-            client_id = msg.get("client_id")
-            
-            self._sec_out_buffer.setdefault(real_key, []).append(msg)
-            self.node_logger.append_to_buffer(client_id, buf_key_logger, msg)
-            
-            if len(self._sec_out_buffer[real_key]) >= self.sec_batch_size:
-                self._flush_sec_buffer_key(real_key)
+            if hasattr(self, "node_logger"):
+                self.node_logger.append_bulk_to_buffer(client_id, buf_key_logger, msgs)
+
+            for i, msg in enumerate(msgs):
+                self._sec_out_buffer.setdefault(real_key, []).append(msg)
+
+                if len(self._sec_out_buffer[real_key]) >= self.sec_batch_size:
+                    self._flush_sec_buffer_key(real_key)
+
+                    remainder = msgs[i+1:]
+                    if remainder and hasattr(self, "node_logger"):
+                        self.node_logger.append_bulk_to_buffer(client_id, buf_key_logger, remainder)
 
     def _flush_main_buffer_key(self, buf_key: str):
         rows = self._main_out_buffer.pop(buf_key, [])
         if not rows:
             return
+
+        clients_in_batch = {row.get("client_id") for row in rows}
+        for cid in clients_in_batch:
+            if hasattr(self, "node_logger"):
+                self.node_logger.clear_buffer(cid, f"out_main_{buf_key}")
+
         body = serialize({
             "rows": rows, 
             "worker_node_id": f"{self.consumer_group}_{self.shard_id}_main"
@@ -312,15 +363,16 @@ class WorkerBaseDoubleIO(HealthCheckServer):
             else:
                 self._main_producer.send(body)
 
-        clients_in_batch = {row.get("client_id") for row in rows}
-        for cid in clients_in_batch:
-            if hasattr(self, "node_logger"):
-                self.node_logger.clear_buffer(cid, f"out_main_{buf_key}")
-
     def _flush_sec_buffer_key(self, buf_key: str):
         rows = self._sec_out_buffer.pop(buf_key, [])
         if not rows:
             return
+
+        clients_in_batch = {row.get("client_id") for row in rows}
+        for cid in clients_in_batch:
+            if hasattr(self, "node_logger"):
+                self.node_logger.clear_buffer(cid, f"out_sec_{buf_key}")
+
         body = serialize({
             "rows": rows, 
             "worker_node_id": f"{self.consumer_group}_{self.shard_id}_sec"
@@ -338,10 +390,6 @@ class WorkerBaseDoubleIO(HealthCheckServer):
             else:
                 self._sec_producer.send(body)
 
-        clients_in_batch = {row.get("client_id") for row in rows}
-        for cid in clients_in_batch:
-            if hasattr(self, "node_logger"):
-                self.node_logger.clear_buffer(cid, f"out_sec_{buf_key}")
 
     def _flush_all_main_buffer(self):
         for key in list(self._main_out_buffer.keys()):
@@ -742,24 +790,46 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                         self.pending_batch_id = msg_hash
                         self.processed_tx_count = 0
 
+                    chunk_main = []
+                    chunk_sec = []
                     for i, row in enumerate(rows):
                         if partial_resume_enabled and is_resuming and i < self.processed_tx_count:
                             continue
 
                         self._current_msg_hash = msg_hash
                         self._current_row_index = i
+                        
                         if self._operation_mode == "PIPELINE":
-                            self._emit_results_main_stage(self.process_main_input(row))
+                            res_main, res_sec = self.process_main_input(row)
+                            if res_main: chunk_main.extend(res_main)
+                            if res_sec: chunk_sec.extend(res_sec)
                         else:
-                            results, _ = self.process_main_input(row)
-                            self._emit_main_output(results)
-                        self.on_main_row_complete()
+                            res_main, _ = self.process_main_input(row)
+                            if res_main: chunk_main.extend(res_main)
                             
-                        if partial_resume_enabled and i % 100 == 0 and i > 0:
-                            self.node_logger.save_batch_state(msg_hash, i, self.last_completed_batch)
+                        self.on_main_row_complete()
+                        
+                        is_last_row = (i == len(rows) - 1)
+                        if (partial_resume_enabled and i % PARTIAL_BATCH_CHECKPOINT_TOTAL == 0 and i > 0) or is_last_row:
+                            
+                            if self._operation_mode == "PIPELINE":
+                                self._emit_results_main_stage((chunk_main, chunk_sec))
+                            else:
+                                self._emit_main_output(chunk_main)
+                                
+                            if partial_resume_enabled and not is_last_row:
+                                current_sizes = {}
+                                for k, v in self._main_out_buffer.items(): current_sizes[f"out_main_{k}"] = len(v)
+                                for k, v in self._sec_out_buffer.items(): current_sizes[f"out_sec_{k}"] = len(v)
+                                
+                                self.node_logger.save_batch_state(msg_hash, i, self.last_completed_batch, current_sizes)
+                                
+                            chunk_main.clear()
+                            chunk_sec.clear()
 
+                    self._flush_all_next_stage()
                     self.on_main_batch_complete()
-                    self.node_logger.save_batch_state(None, 0, msg_hash)
+                    self.node_logger.save_batch_state(None, 0, msg_hash, {})
                     self.pending_batch_id = None
                     self.processed_tx_count = 0
                     self.last_completed_batch = msg_hash
@@ -931,23 +1001,42 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                         self.pending_batch_id = msg_hash
                         self.processed_tx_count = 0
 
+                    chunk_sec = []
+
                     for i, row in enumerate(rows):
                         if partial_resume_enabled and is_resuming and i < self.processed_tx_count:
                             continue
 
                         self._current_msg_hash = msg_hash
                         self._current_row_index = i
+                        
                         if self._operation_mode == "PIPELINE":
-                            self._emit_sec_output(self.process_secondary_input(row)[1])
+                            _, res_sec = self.process_secondary_input(row)
+                            if res_sec: chunk_sec.extend(res_sec)
                         else:
                             self.process_secondary_input(row)
+                            
                         self.on_sec_row_complete()
 
-                        if partial_resume_enabled and i % 100 == 0 and i > 0:
-                            self.node_logger.save_batch_state(msg_hash, i, self.last_completed_batch)
+                        is_last_row = (i == len(rows) - 1)
+                        if (partial_resume_enabled and i % PARTIAL_BATCH_CHECKPOINT_TOTAL == 0 and i > 0) or is_last_row:
+                            
+                            if chunk_sec:
+                                self._emit_sec_output(chunk_sec)
+                                
+                            if partial_resume_enabled and not is_last_row:
+                                # Capturar tamaños de buffers
+                                current_sizes = {}
+                                for k, v in self._main_out_buffer.items(): current_sizes[f"out_main_{k}"] = len(v)
+                                for k, v in self._sec_out_buffer.items(): current_sizes[f"out_sec_{k}"] = len(v)
+                                
+                                self.node_logger.save_batch_state(msg_hash, i, self.last_completed_batch, current_sizes)
+                                
+                            chunk_sec.clear()
 
+                    self._flush_all_next_stage()
                     self.on_sec_batch_complete()
-                    self.node_logger.save_batch_state(None, 0, msg_hash)
+                    self.node_logger.save_batch_state(None, 0, msg_hash, {})
                     self.pending_batch_id = None
                     self.processed_tx_count = 0
                     self.last_completed_batch = msg_hash
@@ -1081,7 +1170,10 @@ class WorkerBaseDoubleIO(HealthCheckServer):
         self.node_logger = BaseNodeLogger(logger_path)
 
         # Recover state
-        self.pending_batch_id, self.processed_tx_count, self.last_completed_batch = self.node_logger.recover_batch_state()
+        (self.pending_batch_id, 
+         self.processed_tx_count, 
+         self.last_completed_batch,
+         self.saved_buffer_sizes) = self.node_logger.recover_batch_state()
         self.completed_eofs = self.node_logger.recover_eof_done()
         self.completed_checkpoints = self.node_logger.recover_checkpoint_done()
 
@@ -1098,6 +1190,7 @@ class WorkerBaseDoubleIO(HealthCheckServer):
             elif raw_buf_key == "control_sec":
                 self._sec_control_buffer.extend(msgs)
 
+        self._reconcile_state()
         self._flush_all_main_buffer()
         self._flush_all_sec_buffer()
         self._flush_main_control_buffer()
@@ -1192,7 +1285,10 @@ class WorkerBaseDoubleIO(HealthCheckServer):
         self.node_logger = BaseNodeLogger(logger_path)
 
         # Recover state
-        self.pending_batch_id, self.processed_tx_count, self.last_completed_batch = self.node_logger.recover_batch_state()
+        (self.pending_batch_id, 
+         self.processed_tx_count, 
+         self.last_completed_batch,
+         self.saved_buffer_sizes) = self.node_logger.recover_batch_state()
         self.completed_eofs = self.node_logger.recover_eof_done()
         self.completed_checkpoints = self.node_logger.recover_checkpoint_done()
 
@@ -1209,6 +1305,7 @@ class WorkerBaseDoubleIO(HealthCheckServer):
             elif raw_buf_key == "control_sec":
                 self._sec_control_buffer.extend(msgs)
 
+        self._reconcile_state()
         self._flush_all_main_buffer()
         self._flush_all_sec_buffer()
         self._flush_main_control_buffer()

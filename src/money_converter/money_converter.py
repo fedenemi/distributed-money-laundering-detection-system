@@ -38,6 +38,7 @@ class MoneyConverter(WorkerBaseDoubleIO):
         self._main_state_dirty = False
         self._main_batch_state_dirty = False
         self._sec_state_dirty = False
+        self._sec_pending_rows_to_mark = []
 
     def supports_partial_batch_resume(self) -> bool:
         return False
@@ -57,22 +58,26 @@ class MoneyConverter(WorkerBaseDoubleIO):
         self._main_batch_state_dirty = False
 
     def on_sec_batch_complete(self):
-        return
+        if self._sec_state_dirty:
+            self._save_persistent_state()
+            self._sec_state_dirty = False
+
+        if self._sec_pending_rows_to_mark:
+            self._mark_rows_processed(self._sec_pending_rows_to_mark)
+            self._sec_pending_rows_to_mark = []
 
     def on_main_row_complete(self):
         if self._main_row_to_mark is not None:
+            self._main_pending_rows_to_mark.append(self._main_row_to_mark)
+
             if self._main_state_dirty:
-                self._main_pending_rows_to_mark.append(self._main_row_to_mark)
                 self._main_batch_state_dirty = True
-            else:
-                self._mark_row_processed(self._main_row_to_mark)
+                
         self._main_row_to_mark = None
         self._main_state_dirty = False
 
     def on_sec_row_complete(self):
-        if self._sec_state_dirty:
-            self._save_persistent_state()
-        self._sec_state_dirty = False
+        pass
 
     def _state_logger(self) -> MoneyConverterLogger:
         worker_name = f"{self.consumer_group}_{self.shard_id}"
@@ -99,7 +104,11 @@ class MoneyConverter(WorkerBaseDoubleIO):
             return
 
         self._processed_row_ids.update(new_row_ids)
-        self._state_logger().append_processed_row_ids(new_row_ids)
+        if hasattr(self, "_shared_lock"):
+            with self._shared_lock:
+                self._state_logger().append_processed_row_ids(new_row_ids)
+        else:
+            self._state_logger().append_processed_row_ids(new_row_ids)
 
     def _normalize_pending(self, pending):
         return MoneyConverterLogger.normalize_pending(pending)
@@ -138,8 +147,7 @@ class MoneyConverter(WorkerBaseDoubleIO):
                 rate_key: self._normalize_pending(rows_by_id)
                 for rate_key, rows_by_id in dict(self._shared_pending).items()
             }
-
-        self._state_logger().save_state(cache, pending)
+            self._state_logger().save_state(cache, pending)
 
     def _log_conversion(self, day, origin_code, target_code, amount_in, rate, amount_out):
         if self._log_samples_remaining <= 0:
@@ -261,18 +269,18 @@ class MoneyConverter(WorkerBaseDoubleIO):
 
             with self._shared_lock:
                 self._shared_cache[rate_key] = currency_rate
-                pending_txs = list(
-                    self._normalize_pending(self._shared_pending.pop(rate_key, {})).values()
-                )
+                pending_dict = self._normalize_pending(self._shared_pending.pop(rate_key, {}))
                 self._sec_state_dirty = True
 
-            for row in pending_txs:
+            for row_id, row in pending_dict.items():
                 amount_in = row["Amount Paid"]
                 amount_out = currency_rate * float(amount_in)
                 row["Amount Paid"] = str(amount_out)
                 row["Payment Currency"] = self._target_currency
                 self._log_conversion(day, origin_code, target_code, amount_in, currency_rate, amount_out)
                 new_data_list.append(row)
+
+                self._sec_pending_rows_to_mark.append(row_id)
 
         return ([], new_data_list)
 
