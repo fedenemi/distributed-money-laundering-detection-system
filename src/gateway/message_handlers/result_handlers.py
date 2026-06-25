@@ -121,11 +121,14 @@ def handle_client_response(
     n_upstream,
     client_semaphores,
     checkpoint_barriers,
-    checkpoint_lock
+    checkpoint_lock,
+    clean_barriers,
+    clean_lock,
 ):
     logging.basicConfig(level=logging.INFO)
     eof_count = {}
     checkpoint_counts = {} 
+    clean_data_clients_counts = {}
     input_queue = middleware.MessageMiddlewareQueueRabbitMQ(mom_host, queue_name)
     handler = message_handler.MessageHandler()
 
@@ -153,6 +156,26 @@ def handle_client_response(
                             
                             del checkpoint_barriers[barrier_key]
                     del checkpoint_counts[local_chk_key]
+
+                ack()
+                return
+
+            if isinstance(payload, dict) and payload.get("type") == "clean":
+                client_id = payload.get("client_id")
+                clean_data_clients_counts[client_id] = clean_data_clients_counts.get(client_id, 0) + 1
+
+                if clean_data_clients_counts[client_id] >= n_upstream:
+                    del clean_data_clients_counts[client_id]
+
+                    with clean_lock:
+                        if client_id not in clean_barriers:
+                            clean_barriers[client_id] = set()
+                            
+                        clean_barriers[client_id].add(query_id)
+
+                        if len(clean_barriers[client_id]) == total_queries:
+                            logging.info(f"Datos de cliente {client_id} borrados de todas las pipelines del sistema")
+                            del clean_barriers[client_id]
 
                 ack()
                 return

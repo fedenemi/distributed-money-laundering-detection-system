@@ -18,25 +18,25 @@ DOCKER_ENV_VARS_NAME = "environment"
 
 OUTPUT_QUEUE = "OUTPUT_QUEUE"
 OUTPUT_EXCHANGE = "OUTPUT_EXCHANGE"
-BANK_OUTPUT_QUEUE = "BANK_OUTPUT_QUEUE"
-BANK_OUTPUT_EXCHANGE = "BANK_OUTPUT_EXCHANGE"
+ACCOUNTS_OUTPUT_EXCHANGE = "ACCOUNTS_OUTPUT_EXCHANGE"
+ACCOUNTS_OUTPUT_SHARDS = "ACCOUNTS_OUTPUT_SHARDS"
 INPUT_QUEUE_PREFIX = "INPUT_QUEUE_PREFIX"
 TOTAL_QUERIES = "TOTAL_QUERIES"
 MAX_IN_FLIGHT_BATCHES = "MAX_IN_FLIGHT_BATCHES"
-TOTAL_MAX_IN_FLIGHT_BATCHES = 1200
+TOTAL_MAX_IN_FLIGHT_BATCHES = 0
 
 def get_gateway_docker_services(
     input_query_queue_prefix,
     total_queries,
     output_queue=None,
     output_exchange=None,
-    banks_out_queue=None,
-    banks_out_exch=None,
+    accounts_out_exch=None,
+    accounts_out_shards=1,
 ):
     # Open config file
     base_path = os.path.dirname(__file__)
     config_file_path = os.path.join(base_path, CONFIG_FILE)
-    
+
     with open(config_file_path, "r") as config_file:
         gateway_service_config = yaml.safe_load(config_file)
 
@@ -50,10 +50,9 @@ def get_gateway_docker_services(
     elif output_exchange is not None:
         gateway_service_config[DOCKER_ENV_VARS_NAME].append(f"{OUTPUT_EXCHANGE}={output_exchange}")
 
-    if banks_out_queue is not None:
-        gateway_service_config[DOCKER_ENV_VARS_NAME].append(f"{BANK_OUTPUT_QUEUE}={banks_out_queue}")
-    elif banks_out_exch is not None:
-        gateway_service_config[DOCKER_ENV_VARS_NAME].append(f"{BANK_OUTPUT_EXCHANGE}={banks_out_exch}")
+    if accounts_out_exch is not None:
+        gateway_service_config[DOCKER_ENV_VARS_NAME].append(f"{ACCOUNTS_OUTPUT_EXCHANGE}={accounts_out_exch}")
+        gateway_service_config[DOCKER_ENV_VARS_NAME].append(f"{ACCOUNTS_OUTPUT_SHARDS}={accounts_out_shards}")
 
     # Total queries and input queue prefix for result queues
     gateway_service_config[DOCKER_ENV_VARS_NAME].append(

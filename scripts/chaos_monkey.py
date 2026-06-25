@@ -164,7 +164,7 @@ def _interrupt_service(
     elif action == "kill_start":
         _run(_docker_compose_cmd(compose_file, project_name, "kill", "-s", "SIGKILL", service), dry_run, cwd)
     else:
-        raise ChaosConfigError("action debe ser restart, stop, stop_start o kill_start.")
+        raise ChaosConfigError("action debe ser restart, stop, kill, stop_start o kill_start.")
 
     logging.info("Servicio %s detenido por %.1fs", service, downtime_seconds)
     if not dry_run:
@@ -184,6 +184,24 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Chaos monkey para servicios de docker compose.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="Archivo YAML de configuracion.")
     parser.add_argument("--compose-file", type=Path, default=None, help="Override del docker-compose.yaml.")
+    parser.add_argument(
+        "--service",
+        action="append",
+        default=[],
+        help=(
+            "Servicio exacto a interrumpir. Puede repetirse. "
+            "Si se indica, reemplaza allowed_services/allowed_patterns del YAML."
+        ),
+    )
+    parser.add_argument(
+        "--pattern",
+        action="append",
+        default=[],
+        help=(
+            "Regex de servicios candidatos. Puede repetirse. "
+            "Si se indica, reemplaza allowed_services/allowed_patterns del YAML."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true", help="Muestra acciones sin ejecutarlas.")
     parser.add_argument("--once", action="store_true", help="Ejecuta una sola interrupcion y termina.")
     parser.add_argument("--seed", type=int, default=None, help="Semilla para reproducibilidad.")
@@ -214,6 +232,15 @@ def main() -> int:
     if args.dry_run and not args.once and max_events is None:
         max_events = 1
         logging.info("Dry-run sin max_events: se ejecutara un solo evento de prueba.")
+
+    if args.service or args.pattern:
+        config["allowed_services"] = args.service
+        config["allowed_patterns"] = args.pattern
+        logging.info(
+            "Candidatos override por CLI: services=%s patterns=%s",
+            args.service or [],
+            args.pattern or [],
+        )
 
     compose_services = _load_compose_services(compose_file)
     candidates = _build_candidates(config, compose_services)

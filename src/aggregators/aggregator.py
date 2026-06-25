@@ -26,6 +26,7 @@ import os
 import sys
 sys.path.insert(0, "/app") 
 sys.path.insert(0, "/app/common") 
+from aggregator_logger import AggregatorLogger
 from common.middleware.worker_base import WorkerBase
 
 logging.basicConfig(level=logging.INFO)
@@ -44,22 +45,54 @@ class Aggregator(WorkerBase):
         ]
         self.output_tag   = os.environ.get("OUTPUT_TAG", "")
         self._state       = {}  # ahora será {client_id: {key: accumulator}}
+        worker_name = f"{self.consumer_group}_{self.shard_id}"
+        self._state_logger = AggregatorLogger(worker_name)
+        self._applied_batch_id = None
         logger.info(
             f"Aggregator op={self.op} field={self.agg_field} "
             f"key={self.key_field or '(global)'}"
         )
 
+    def on_worker_started(self):
+        self._state, self._applied_batch_id = self._state_logger.recover_state()
+        if self._state:
+            logger.info(
+                "Aggregator recupero estado: clients=%s applied_batch_id=%s",
+                len(self._state),
+                self._applied_batch_id,
+            )
+
+    def supports_partial_batch_resume(self) -> bool:
+        return False
+
+    def on_batch_complete(self, batch_id: str):
+        self._applied_batch_id = batch_id
+        self._state_logger.save_state(self._state, self._applied_batch_id)
+
+    def on_eof_complete(self, client_id=None):
+        if client_id is None:
+            self._state.clear()
+        else:
+            self._state.pop(self._client_key(client_id), None)
+        self._state_logger.save_state(self._state, self._applied_batch_id)
+
     def _key(self, data: dict) -> str:
         return str(data.get(self.key_field, "__global__")) if self.key_field else "__global__"
 
-    def _ensure_client_state(self, client_id: str):
-        if client_id not in self._state:
-            self._state[client_id] = {}
+    def _client_key(self, client_id) -> str:
+        return "__global__" if client_id is None else str(client_id)
+
+    def _ensure_client_state(self, client_key: str):
+        if client_key not in self._state:
+            self._state[client_key] = {}
 
     def process(self, data: dict) -> list:
-        client_id = data.get("client_id", "__global__")
-        self._ensure_client_state(client_id)
-        state = self._state[client_id]
+        if getattr(self, "_current_msg_hash", None) == self._applied_batch_id:
+            return []
+
+        client_key = self._client_key(data.get("client_id", "__global__"))
+        self._ensure_client_state(client_key)
+        state = self._state[client_key]
         k = self._key(data)
 
         if self.op == "max":
@@ -97,9 +130,19 @@ class Aggregator(WorkerBase):
             yield from all_results
         else:
             # EOF de un cliente específico
-            cstate = self._state.pop(client_id, {})
+            cstate = self._state.get(self._client_key(client_id), {})
             for k, acc in cstate.items():
                 yield self._build_result(k, acc, client_id)
+
+    def on_clean_client_data(self, client_id=None):
+        if client_id is not None:
+            # Clean state of RAM
+            if client_id in self._state:
+                del self._state[client_id]
+
+            # Clean data on logger
+            self._state_logger.clear_client_state(client_id)
+
 
     def _build_result(self, key, acc, client_id):
         result = {}

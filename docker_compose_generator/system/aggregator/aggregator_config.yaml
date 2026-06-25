@@ -7,3 +7,5 @@ depends_on:
 environment:
 - MOM_HOST=rabbitmq
 - PYTHONUNBUFFERED=1
+volumes:
+- ./worker_logs:/worker_logs

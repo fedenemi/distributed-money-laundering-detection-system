@@ -34,7 +34,15 @@ class MoneyConversionClient(WorkerBase):
             else:
                 conversion_rate = self._currency_rates_by_date[datetime][(origin_curr, dest_curr)]
             data_copy = data.copy()
+            data_copy["request_id"] = data.get("request_id", f"{datetime}_{origin_curr}_{dest_curr}")
             data_copy["conversion_rate"] = conversion_rate
+            logging.info(
+                "Respuesta conversion request_id=%s origin=%s dest=%s day=%s",
+                data_copy["request_id"],
+                origin_curr,
+                dest_curr,
+                datetime,
+            )
             return [data_copy]
 
         return [{"Type" : "eob"}]

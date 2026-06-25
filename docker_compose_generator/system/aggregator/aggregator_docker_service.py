@@ -61,12 +61,13 @@ def get_aggregator_docker_services(service_prefix, total_instances,
 
         # Add environment variables
         ## I/O
+        new_service_config[DOCKER_ENV_VARS_NAME].append(f"{CONSUMER_GROUP_TAG}={service_prefix}")
+        new_service_config[DOCKER_ENV_VARS_NAME].append(f"{SHARD_ID_TAG}={i}")
+
         if input_queue is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{INPUT_QUEUE_TAG}={input_queue}")
         elif input_exchange is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{INPUT_EXCHANGE_TAG}={input_exchange}")
-            new_service_config[DOCKER_ENV_VARS_NAME].append(f"{CONSUMER_GROUP_TAG}={service_prefix}")
-            new_service_config[DOCKER_ENV_VARS_NAME].append(f"{SHARD_ID_TAG}={i}")
             
         if n_upstream is not None:
             new_service_config[DOCKER_ENV_VARS_NAME].append(f"{N_UPSTREAM_TAG}={n_upstream}")

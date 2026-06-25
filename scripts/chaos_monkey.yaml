@@ -10,23 +10,49 @@ compose_file: docker-compose.yaml
 
 action: kill
 
-initial_delay_seconds: 20
+initial_delay_seconds: 10
 interval_seconds: [30, 90]
 downtime_seconds: [5, 20]
-max_events: 1
+max_events: 3
+max_events: 3
 
 # Allowlist exacta. Usala para pruebas quirurgicas sobre servicios puntuales.
 allowed_services: []
 
 # Allowlist por regex. Solo estos servicios pueden ser interrumpidos.
 allowed_patterns:
+  # Base WorkerBase: filtros y reducers simples.
   - "^usd_filter_"
   - "^q[1-5]_filter_"
   - "^q[1-5]_data_reducer_"
-  - "^q[1-2]_splitter"
+
+  # Aggregator generico con estado persistido.
+  - "^q2_aggregator_"
+  - "^q3_avg_aggregators_preceding_period_"
+  - "^q5_counter_"
+  - "^q5_transaction_counter_"
+
+  # Splitters sin estado propio complejo.
+  - "^q2_splitter_by_bank_"
   - "^q3_splitter_by_payment_method_"
-  - "^q4_splitters_by_origin_and_dest_prefix_"
-  - "^q4_paths_splitters_by_ends_"
+  - "^q4_splitters_by_origin_and_dest_inc_"
+  - "^q4_splitters_by_origin_and_dest_out_"
+
+  # Double IO con persistencia propia.
+  - "^q2_banks_name_adder_"
+  - "^q3_avg_and_transactions_joiner_"
+  - "^q5_money_converter_"
+
+  # API client stateless: los requests pendientes viven en MoneyConverter/Rabbit.
+  - "^q5_money_converter_api_client_"
+
+  # Q4 graph nodes con estado persistido.
+  - "^q4_inc_edges_filter_"
+  - "^q4_out_edges_filter_"
+  - "^q4_paths_creators_"
+  - "^q4_paths_aggregator_"
+
+  - "^monitor_"
 
 # Servicios criticos que no queremos detener por defecto.
 exclude_services:
@@ -35,7 +61,6 @@ exclude_services:
 
 exclude_patterns:
   - "^client_"
-  - "^q5_money_converter_api_client_"
 
 # Pesos opcionales por servicio. Mayor peso => mas probabilidad de ser elegido.
 weights: {}

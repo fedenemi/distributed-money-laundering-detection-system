@@ -11,7 +11,7 @@ TEMP_DATA_FILE = "temp_data.txt"
 
 class DiskSet():
 
-    def __init__(self, id=None, encode_func=None, decode_func=None):
+    def __init__(self, id=None, encode_func=None, decode_func=None, base_dir=None):
         # Define RAM set
         self._internal_set = set()
 
@@ -20,10 +20,11 @@ class DiskSet():
         self._decode_func = decode_func
 
         # Define folder
+        storage_base = Path(base_dir or "/tmp")
         if id is not None:
-            self._data_dir = Path(f"/tmp/storage_{id}")
+            self._data_dir = storage_base.joinpath(f"storage_{id}")
         else:
-            self._data_dir = Path(f"/tmp/storage")
+            self._data_dir = storage_base.joinpath("storage")
         os.makedirs(self._data_dir, exist_ok=True)
 
         # Define file
@@ -33,8 +34,8 @@ class DiskSet():
         self._temp_data_file_path = self._data_dir.joinpath(TEMP_DATA_FILE)
 
 
-    def __del__(self):
-        del self._internal_set
+    def cleanup(self):
+        self._internal_set.clear()
         self._data_file_path.unlink(missing_ok=True)
         self._temp_data_file_path.unlink(missing_ok=True)
         try:

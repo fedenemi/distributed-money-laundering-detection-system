@@ -6,8 +6,6 @@ import os
 from message_handlers import client_handlers, result_handlers
 from common.health.health_server import HealthCheckServer
 
-
-
 def main():
     logging.basicConfig(level=logging.INFO)
 
@@ -17,27 +15,24 @@ def main():
     SERVER_HOST = os.environ.get("SERVER_HOST")
     PORT = int(os.environ.get("SERVER_PORT"))
     MOM_HOST = os.environ.get("MOM_HOST", "rabbitmq")
+    
     OUTPUT_QUEUE = os.environ.get("OUTPUT_QUEUE", "")
     OUTPUT_EXCHANGE = os.environ.get("OUTPUT_EXCHANGE", "")
-    BANK_OUTPUT_QUEUE = os.environ.get("BANK_OUTPUT_QUEUE", "")
-    BANK_OUTPUT_EXCHANGE = os.environ.get("BANK_OUTPUT_EXCHANGE", "")
+    
+    # Cuentas via Exchange
+    ACCOUNTS_OUTPUT_EXCHANGE = os.environ.get("ACCOUNTS_OUTPUT_EXCHANGE", "")
+    ACCOUNTS_OUTPUT_SHARDS = int(os.environ.get("ACCOUNTS_OUTPUT_SHARDS", "1"))
 
     transaction_columns_raw = os.environ.get("TRANSACTION_COLUMNS", "")
     TRANSACTION_COLUMNS = [
-        col.strip()
-        for col in transaction_columns_raw.split(",")
-        if col.strip()
+        col.strip() for col in transaction_columns_raw.split(",") if col.strip()
     ]
 
     TOTAL_QUERIES = int(os.environ.get("TOTAL_QUERIES", "1"))
-    INPUT_QUERY_QUEUE_PREFIX = os.environ.get(
-        "INPUT_QUEUE_PREFIX",
-        "results"
-    )
+    INPUT_QUERY_QUEUE_PREFIX = os.environ.get("INPUT_QUEUE_PREFIX", "results")
 
     result_queues = [
-        f"{INPUT_QUERY_QUEUE_PREFIX}_{i}"
-        for i in range(1, TOTAL_QUERIES + 1)
+        f"{INPUT_QUERY_QUEUE_PREFIX}_{i}" for i in range(1, TOTAL_QUERIES + 1)
     ]
 
     logging.info(f"TRANSACTION_COLUMNS loaded: {TRANSACTION_COLUMNS}")
@@ -50,8 +45,11 @@ def main():
     client_semaphores = {}
     client_ack_queues = {}
     client_send_locks = {}
+    client_input_done_events = {}
     checkpoint_barriers = {}
     checkpoint_lock = threading.Lock()
+    clean_barriers = {}
+    clean_lock = threading.Lock()
 
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.bind((SERVER_HOST, PORT))
@@ -76,11 +74,12 @@ def main():
                 "client_semaphores": client_semaphores,
                 "checkpoint_barriers": checkpoint_barriers,
                 "checkpoint_lock": checkpoint_lock,
+                "clean_barriers": clean_barriers,
+                "clean_lock": clean_lock,
             }
         )
         t.daemon = True
         t.start()
-
         logging.info(f"Started result handler for queue: {queue_name}")
 
     # Main clients loop
@@ -98,8 +97,8 @@ def main():
                     MOM_HOST,
                     OUTPUT_QUEUE,
                     OUTPUT_EXCHANGE,
-                    BANK_OUTPUT_QUEUE,
-                    BANK_OUTPUT_EXCHANGE,
+                    ACCOUNTS_OUTPUT_EXCHANGE,
+                    ACCOUNTS_OUTPUT_SHARDS,
                     TRANSACTION_COLUMNS,
                     client_checkpoints,
                     client_semaphores,
@@ -107,15 +106,14 @@ def main():
                     checkpoint_lock,
                     client_ack_queues,
                     client_send_locks,
+                    client_input_done_events,
                 ),
             )
-
             t.daemon = True
             t.start()
 
         except Exception as e:
             logging.exception(f"Accept error: {e}")
-
 
 if __name__ == "__main__":
     main()

@@ -7,3 +7,6 @@ datasets/*
 # Results
 results/*
 expected_results/LI_*/*.Identifier
+
+# Logs
+worker_logs/*
