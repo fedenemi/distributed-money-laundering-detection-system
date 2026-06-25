@@ -14,6 +14,7 @@ class BaseNodeLogger:
         self.eof_done_filepath = f"{base_filepath}_eof_done.log"
         self.checkpoint_done_filepath = f"{base_filepath}_checkpoint_done.log"
         self.batch_state_filepath = f"{base_filepath}_batch_state.json"
+        self.clean_filepath = f"{base_filepath}_clean.log"
 
         if not os.path.exists(self.eof_filepath):
             open(self.eof_filepath, 'ab').close()
@@ -21,7 +22,10 @@ class BaseNodeLogger:
             open(self.eof_done_filepath, 'ab').close()
         if not os.path.exists(self.checkpoint_done_filepath):
             open(self.checkpoint_done_filepath, 'ab').close()
+        if not os.path.exists(self.clean_filepath):
+            open(self.clean_filepath, 'ab').close()
 
+        self._clean_cmd_fd = open(self.clean_filepath, 'ab')
         self._eof_fd = open(self.eof_filepath, 'ab')
         self._eof_done_fd = open(self.eof_done_filepath, 'ab')
         self._checkpoint_done_fd = open(self.checkpoint_done_filepath, 'ab')
@@ -251,6 +255,8 @@ class BaseNodeLogger:
             self._eof_done_fd.close()
         if self._checkpoint_done_fd and not self._checkpoint_done_fd.closed:
             self._checkpoint_done_fd.close()
+        if self._clean_cmd_fd and not self._clean_cmd_fd.closed:
+            self._clean_cmd_fd.close()
         for fd in self._buffer_fds.values():
             if not fd.closed:
                 fd.close()
@@ -277,3 +283,60 @@ class BaseNodeLogger:
             
         fd.write(final_bytes)
         fd.flush()
+
+    def log_clean(self, client_id: str, emitter_id: str):
+        self._write_in_file(self._clean_cmd_fd, {
+            "client_id": client_id, 
+            "emitter_id": emitter_id
+        }, sync=True)
+
+    def recover_cleans(self) -> Dict[str, Set[str]]:
+        cleans = {}
+        for record in self._read_from_file(self.clean_filepath):
+            cid = record.get("client_id")
+            eid = record.get("emitter_id")
+            if cid is not None:
+                cleans.setdefault(str(cid), set()).add(eid)
+        return cleans
+
+    def clear_clean_state(self, client_id: str):
+        records = [
+            record for record in self._read_from_file(self.clean_filepath)
+            if str(record.get("client_id")) != str(client_id)
+        ]
+        tmp_path = self.clean_filepath + ".tmp"
+        with open(tmp_path, "wb") as tmp_fd:
+            for record in records:
+                self._write_in_file(tmp_fd, record, sync=False)
+            tmp_fd.flush()
+            os.fsync(tmp_fd.fileno())
+        os.replace(tmp_path, self.clean_filepath)
+
+        if self._clean_cmd_fd and not self._clean_cmd_fd.closed:
+            self._clean_cmd_fd.close()
+        self._clean_cmd_fd = open(self.clean_filepath, 'ab')
+
+    def clear_all_data_for_client(self, client_id: str):
+        if client_id is None:
+            return
+            
+        client_id = str(client_id)
+
+        pattern = f"{self.base_filepath}_buf_{client_id}_*.log"
+        for filepath in glob.glob(pattern):
+            try:
+                basename = filepath.replace(f"{self.base_filepath}_buf_{client_id}_", "")
+                buf_key = basename[:-4]
+                key = (client_id, buf_key)
+                if key in self._buffer_fds:
+                    if not self._buffer_fds[key].closed:
+                        self._buffer_fds[key].close()
+                    del self._buffer_fds[key]
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+            except Exception as e:
+                logger.error(f"Error limpiando disco para {client_id}: {e}")
+
+        self.clear_eof(client_id)
+        self.clear_eof_done(client_id)
+        self.clear_checkpoint_done_for_client(client_id)

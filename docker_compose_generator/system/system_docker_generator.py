@@ -238,7 +238,7 @@ def generate_system_docker_compose(total_clients=0):
             main_input_exchange="q2_results_formatter",
             main_n_upstream=q2_aggregator_instances,
             sec_input_exchange="q2_banks_exchange",
-            sec_n_upstream=1,
+            sec_n_upstream=q2_accounts_parser_instances,
             sec_output_queue="results_2",
         )
         system = system | q2_bank_names_adders

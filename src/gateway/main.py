@@ -48,6 +48,8 @@ def main():
     client_input_done_events = {}
     checkpoint_barriers = {}
     checkpoint_lock = threading.Lock()
+    clean_barriers = {}
+    clean_lock = threading.Lock()
 
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.bind((SERVER_HOST, PORT))
@@ -72,6 +74,8 @@ def main():
                 "client_semaphores": client_semaphores,
                 "checkpoint_barriers": checkpoint_barriers,
                 "checkpoint_lock": checkpoint_lock,
+                "clean_barriers": clean_barriers,
+                "clean_lock": clean_lock,
             }
         )
         t.daemon = True

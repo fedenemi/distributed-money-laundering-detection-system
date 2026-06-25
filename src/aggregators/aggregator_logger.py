@@ -39,3 +39,13 @@ class AggregatorLogger:
             os.fsync(file.fileno())
 
         os.replace(tmp_path, self.state_path)
+
+    def clear_client_state(self, client_id):
+        if client_id is None:
+            return
+
+        str_key = str(client_id)
+        state, applied_batch_id = self.recover_state()
+        if str_key in state:
+            del state[str_key]
+            self.save_state(state, applied_batch_id)

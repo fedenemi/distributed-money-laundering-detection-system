@@ -188,6 +188,39 @@ class BankNameAdder(WorkerBaseDoubleIO):
             self._save_persistent_state()
 
         return []
+    
+    def on_clean_client_data(self, client_id=None):
+        if client_id is None:
+            return
+
+        client_key = str(client_id)
+        state_changed = False
+
+        if hasattr(self, "_shared_lock"):
+            with self._shared_lock:
+                for bank_id in list(self._shared_pending.keys()):
+                    rows_by_id = self._normalize_pending(self._shared_pending[bank_id])
+
+                    keys_to_delete = [
+                        row_id for row_id, row_data in rows_by_id.items()
+                        if str(row_data.get("client_id", "")) == client_key
+                    ]
+
+                    if keys_to_delete:
+                        for k in keys_to_delete:
+                            del rows_by_id[k]
+
+                        if not rows_by_id:
+                            del self._shared_pending[bank_id]
+                        else:
+                            self._shared_pending[bank_id] = rows_by_id
+
+                        state_changed = True
+
+        if state_changed:
+            self._save_persistent_state()
+            
+        logging.info(f"[{self.__class__.__name__}] Limpieza completa para {client_key} (Caché global de bancos preservada)")
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

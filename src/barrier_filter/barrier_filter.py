@@ -272,6 +272,43 @@ class BarrierFilter(WorkerBaseDoubleIO):
         self._save_persistent_state()
         logging.info("Estado del cliente limpiado")
         return iter([])
+    
+    def on_clean_client_data(self, client_id=None):
+        if client_id is None:
+            return
+
+        client_key = self._client_key(client_id)
+        state_changed = False
+
+        with self._spool_lock:
+            self._local_thresholds_ready.discard(client_key)
+            if client_key in self._local_comparison_values:
+                del self._local_comparison_values[client_key]
+            if client_key in self._spool_buffer:
+                del self._spool_buffer[client_key]
+
+            if client_key in self._thresholds_ready_by_client:
+                del self._thresholds_ready_by_client[client_key]
+                state_changed = True
+
+            if client_key in self._comparison_values_by_client:
+                del self._comparison_values_by_client[client_key]
+                state_changed = True
+
+        if state_changed:
+            self._save_persistent_state()
+
+        active_path = self._spool_path(client_id)
+        snapshot_path = self._snapshot_path(client_id)
+
+        for path in [active_path, snapshot_path]:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError as e:
+                    logging.error(f"Error borrando archivo de spool {path}: {e}")
+
+        logging.info(f"Limpieza completa para {client_key} (RAM, JSON y archivos de Spool)")
 
 
 if __name__ == "__main__":

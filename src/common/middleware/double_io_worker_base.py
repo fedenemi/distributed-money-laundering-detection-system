@@ -243,6 +243,9 @@ class WorkerBaseDoubleIO(HealthCheckServer):
 
     def on_sec_row_complete(self):
         return
+    
+    def on_clean_client_data(self, client_id=None):
+        pass
 
     def _routing_key(self, msg: dict) -> str:
         """Clave de particion del mensaje. Override en Splitter."""
@@ -659,6 +662,61 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                 self._send_sec_output_eof(client_id)
             self._mark_eof_done("both", client_id)
 
+    def _purge_local_process_state(self, client_id: str, is_main: bool):
+        """Limpia los buffers de RAM, sets de completitud y disco LOCALES del proceso."""
+        client_id = str(client_id)
+        out_buffer = self._main_out_buffer if is_main else self._sec_out_buffer
+
+        keys_to_delete = []
+        for buf_key, msgs in out_buffer.items():
+            out_buffer[buf_key] = [m for m in msgs if str(m.get("client_id", "")) != client_id]
+            if not out_buffer[buf_key]: keys_to_delete.append(buf_key)
+        for k in keys_to_delete: del out_buffer[k]
+
+        eof_dict = self._clients_eof_main_input if is_main else self._clients_eof_sec_input
+        if client_id in eof_dict: del eof_dict[client_id]
+
+        if is_main:
+            try:
+                if client_id in self._clients_joined: del self._clients_joined[client_id]
+                if client_id in self._clients_secondary_ready: del self._clients_secondary_ready[client_id]
+            except KeyError: pass
+
+        key_eof = self._eof_done_key("main" if is_main else "secondary", client_id)
+        if key_eof in self.completed_eofs: self.completed_eofs.remove(key_eof)
+            
+        chk_keys = [k for k in self.completed_checkpoints if f":{client_id}:" in k]
+        for k in chk_keys: self.completed_checkpoints.remove(k)
+
+        if hasattr(self, "node_logger"):
+            self.node_logger.clear_all_data_for_client(client_id)
+            self.node_logger.clear_clean_state(client_id)
+
+    def _send_main_clean(self, client_id):
+        if self._main_producer:
+            self._emit_main_control({"type": "clean", "client_id": client_id, "worker_node_id": f"{self.consumer_group}_{self.shard_id}_main"})
+
+    def _send_sec_clean(self, client_id):
+        if self._sec_producer:
+            self._emit_sec_control({"type": "clean", "client_id": client_id, "worker_node_id": f"{self.consumer_group}_{self.shard_id}_sec"})
+
+    def _propagate_clean_main(self, client_id):
+        if self.main_eof_dest in ["MAIN", "BOTH"]: self._send_main_clean(client_id)
+        if self.main_eof_dest in ["SECONDARY", "BOTH"]: self._send_sec_clean(client_id)
+
+    def _propagate_clean_sec(self, client_id):
+        if self.sec_eof_dest in ["MAIN", "BOTH"]: self._send_main_clean(client_id)
+        if self.sec_eof_dest in ["SECONDARY", "BOTH"]: self._send_sec_clean(client_id)
+
+    def _propagate_clean_joint(self, client_id):
+        if self._operation_mode == "PIPELINE":
+            if self.main_eof_dest in ["MAIN", "BOTH"] or self.sec_eof_dest in ["MAIN", "BOTH"]:
+                self._send_main_clean(client_id)
+            if self.main_eof_dest in ["SECONDARY", "BOTH"] or self.sec_eof_dest in ["SECONDARY", "BOTH"]:
+                self._send_sec_clean(client_id)
+        else:
+            self._send_main_clean(client_id)
+
     # --- Loop principal ---------------------------------------------------------
 
     def handle_message_main_input(self, recovered_eof_global=None):
@@ -780,13 +838,44 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                         ack()
                     return
 
+                elif msg.get("type") == "clean":
+                    client_id = msg.get("client_id")
+                    sender_id = self._sender_id(msg, msg_hash)
+                    
+                    if client_id is not None:
+                        client_id = str(client_id)
+                        with self._eof_lock:
+                            senders = self._sender_set(self._clean_senders_main, client_id)
+                            if sender_id not in senders:
+                                self.node_logger.log_clean(client_id, sender_id)
+                                senders.add(sender_id)
+                                self._clean_senders_main[client_id] = senders
+                                
+                                if len(senders) >= self.main_n_upstream:
+                                    self._purge_local_process_state(client_id, is_main=True)
+
+                                    if self._operation_mode == "PIPELINE" and not self.waits_for_both_pipeline_eofs():
+                                        self.on_clean_client_data(client_id)
+                                        self._propagate_clean_main(client_id)
+                                    else:
+                                        sec_ready = self._sender_count(self._clean_senders_sec, client_id) >= self.sec_n_upstream
+                                        if sec_ready and not self._clients_cleaned.get(client_id, False):
+                                            self._clients_cleaned[client_id] = True
+                                            self.on_clean_client_data(client_id)
+                                            self._propagate_clean_joint(client_id)
+                    ack()
+                    return
+
                 else:
                     partial_resume_enabled = self.supports_partial_batch_resume()
                     is_resuming = (msg_hash == self.pending_batch_id)
                     rows = msg.get("rows", [])
 
                     if not is_resuming:
-                        self.node_logger.save_batch_state(msg_hash, 0, self.last_completed_batch)
+                        current_sizes = {}
+                        for k, v in self._main_out_buffer.items(): current_sizes[f"out_main_{k}"] = len(v)
+                        for k, v in self._sec_out_buffer.items(): current_sizes[f"out_sec_{k}"] = len(v)
+                        self.node_logger.save_batch_state(msg_hash, 0, self.last_completed_batch, current_sizes)
                         self.pending_batch_id = msg_hash
                         self.processed_tx_count = 0
 
@@ -990,6 +1079,34 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                         self._execute_eof_sec_input(client_id)
                         ack()
                     return
+                
+                elif msg.get("type") == "clean":
+                    client_id = msg.get("client_id")
+                    sender_id = self._sender_id(msg, msg_hash)
+                    
+                    if client_id is not None:
+                        client_id = str(client_id)
+                        with self._eof_lock:
+                            senders = self._sender_set(self._clean_senders_sec, client_id)
+                            if sender_id not in senders:
+                                self.node_logger.log_clean(client_id, sender_id)
+                                senders.add(sender_id)
+                                self._clean_senders_sec[client_id] = senders
+                                
+                                if len(senders) >= self.sec_n_upstream:
+                                    self._purge_local_process_state(client_id, is_main=False)
+
+                                    if self._operation_mode == "PIPELINE" and not self.waits_for_both_pipeline_eofs():
+                                        self.on_clean_client_data(client_id)
+                                        self._propagate_clean_sec(client_id)
+                                    else:
+                                        main_ready = self._sender_count(self._clean_senders_main, client_id) >= self.main_n_upstream
+                                        if main_ready and not self._clients_cleaned.get(client_id, False):
+                                            self._clients_cleaned[client_id] = True
+                                            self.on_clean_client_data(client_id)
+                                            self._propagate_clean_joint(client_id)
+                    ack()
+                    return
 
                 else:
                     partial_resume_enabled = self.supports_partial_batch_resume()
@@ -997,7 +1114,10 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                     rows = msg.get("rows", [])
 
                     if not is_resuming:
-                        self.node_logger.save_batch_state(msg_hash, 0, self.last_completed_batch)
+                        current_sizes = {}
+                        for k, v in self._main_out_buffer.items(): current_sizes[f"out_main_{k}"] = len(v)
+                        for k, v in self._sec_out_buffer.items(): current_sizes[f"out_sec_{k}"] = len(v)
+                        self.node_logger.save_batch_state(msg_hash, 0, self.last_completed_batch, current_sizes)
                         self.pending_batch_id = msg_hash
                         self.processed_tx_count = 0
 
@@ -1108,6 +1228,9 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                          shared_lock,
                          checkpoints_main,
                          checkpoints_sec,
+                         clean_senders_main,
+                         clean_senders_sec,
+                         clients_cleaned,
                          ):
         logging.basicConfig(level=logging.INFO)
         
@@ -1122,6 +1245,9 @@ class WorkerBaseDoubleIO(HealthCheckServer):
         self._shared_lock = shared_lock
         self._checkpoints_main = checkpoints_main
         self._checkpoints_sec = checkpoints_sec
+        self._clean_senders_main = clean_senders_main
+        self._clean_senders_sec = clean_senders_sec
+        self._clients_cleaned = clients_cleaned
 
         # Input
         self.main_input_queue     = os.environ.get("MAIN_INPUT_QUEUE", "")
@@ -1207,6 +1333,28 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                 logger.info(f"{self.__class__.__name__} recupero EOF main completo para client_id={cid}; ejecutando cierre pendiente")
                 self._execute_eof_main_input(cid)
 
+        # Recover clean commands
+        recovered_cleans = self.node_logger.recover_cleans()
+        for cid, senders in recovered_cleans.items():
+            with self._eof_lock:
+                current = self._sender_set(self._clean_senders_main, cid)
+                current.update(senders)
+                self._clean_senders_main[cid] = current
+                
+                if len(self._sender_set(self._clean_senders_main, cid)) >= self.main_n_upstream:
+                    logger.info(f"[MAIN] Recupera clean completo para client_id={cid}. Retomando limpieza interrumpida...")
+                    self._purge_local_process_state(cid, is_main=True)
+
+                    if self._operation_mode == "PIPELINE" and not self.waits_for_both_pipeline_eofs():
+                        self.on_clean_client_data(cid)
+                        self._propagate_clean_main(cid)
+                    else:
+                        sec_ready = self._sender_count(self._clean_senders_sec, cid) >= self.sec_n_upstream
+                        if sec_ready and not self._clients_cleaned.get(cid, False):
+                            self._clients_cleaned[cid] = True
+                            self.on_clean_client_data(cid)
+                            self._propagate_clean_joint(cid)
+
         signal.signal(signal.SIGTERM, self._handle_main_process_sigterm)
         self.handle_message_main_input(recovered_eof_global)
 
@@ -1221,6 +1369,9 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                         shared_lock,
                         checkpoints_main,
                         checkpoints_sec,
+                        clean_senders_main,
+                        clean_senders_sec,
+                        clients_cleaned,
                         ):
         logging.basicConfig(level=logging.INFO)
         
@@ -1235,6 +1386,9 @@ class WorkerBaseDoubleIO(HealthCheckServer):
         self._shared_lock = shared_lock
         self._checkpoints_main = checkpoints_main
         self._checkpoints_sec = checkpoints_sec
+        self._clean_senders_main = clean_senders_main
+        self._clean_senders_sec = clean_senders_sec
+        self._clients_cleaned = clients_cleaned
 
         # Input
         self.sec_input_queue     = os.environ.get("SECONDARY_INPUT_QUEUE", "")
@@ -1322,6 +1476,28 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                 logger.info(f"{self.__class__.__name__} recupero EOF secondary completo para client_id={cid}; ejecutando cierre pendiente")
                 self._execute_eof_sec_input(cid)
 
+        # Recover clean commands
+        recovered_cleans = self.node_logger.recover_cleans()
+        for cid, senders in recovered_cleans.items():
+            with self._eof_lock:
+                current = self._sender_set(self._clean_senders_sec, cid)
+                current.update(senders)
+                self._clean_senders_sec[cid] = current
+                
+                if len(self._sender_set(self._clean_senders_sec, cid)) >= self.sec_n_upstream:
+                    logger.info(f"[SEC] Recupera clean completo para client_id={cid}. Retomando limpieza interrumpida...")
+                    self._purge_local_process_state(cid, is_main=False)
+
+                    if self._operation_mode == "PIPELINE" and not self.waits_for_both_pipeline_eofs():
+                        self.on_clean_client_data(cid)
+                        self._propagate_clean_sec(cid)
+                    else:
+                        main_ready = self._sender_count(self._clean_senders_main, cid) >= self.main_n_upstream
+                        if main_ready and not self._clients_cleaned.get(cid, False):
+                            self._clients_cleaned[cid] = True
+                            self.on_clean_client_data(cid)
+                            self._propagate_clean_joint(cid)
+
         signal.signal(signal.SIGTERM, self._handle_sec_process_sigterm)
         self.handle_message_sec_input(recovered_eof_global)
 
@@ -1341,6 +1517,9 @@ class WorkerBaseDoubleIO(HealthCheckServer):
         shared_lock = manager.Lock()
         checkpoints_main = manager.dict()
         checkpoints_sec = manager.dict()
+        clean_senders_main = manager.dict()
+        clean_senders_sec = manager.dict()
+        clients_cleaned = manager.dict()
 
         # Create processes
         main_process = multiprocessing.Process(
@@ -1356,6 +1535,9 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                   shared_lock,
                   checkpoints_main,
                   checkpoints_sec,
+                  clean_senders_main,
+                  clean_senders_sec,
+                  clients_cleaned,
                   )
         )
         sec_process = multiprocessing.Process(
@@ -1371,6 +1553,9 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                   shared_lock,
                   checkpoints_main,
                   checkpoints_sec,
+                  clean_senders_main,
+                  clean_senders_sec,
+                  clients_cleaned,
                   )
         )
 
