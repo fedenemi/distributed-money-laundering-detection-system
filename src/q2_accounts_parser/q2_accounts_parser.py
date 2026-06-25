@@ -44,6 +44,19 @@ class Q2AccountsParser(WorkerBase):
             self.sent_bank_ids = {k for k in self.sent_bank_ids if not k.startswith(f"{client_id}:")}
         self.processed_count = 0
         return []
+    
+    def on_clean_client_data(self, client_id=None):
+        if client_id is None:
+            return
+
+        prefix = f"{client_id}:"
+        original_size = len(self.sent_bank_ids)
+        self.sent_bank_ids = {k for k in self.sent_bank_ids if not k.startswith(prefix)}
+        removed_count = original_size - len(self.sent_bank_ids)
+        if removed_count > 0:
+            self.processed_count = max(0, self.processed_count - removed_count)
+            
+        logger.info(f"Limpieza completa de RAM para cliente {client_id}. Se purgaron {removed_count} IDs cacheados.")
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

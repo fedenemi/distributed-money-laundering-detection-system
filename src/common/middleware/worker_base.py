@@ -80,6 +80,7 @@ class WorkerBase(HealthCheckServer):
         self.eof_global_senders, self.eof_client_senders = self.node_logger.recover_eofs()
         self.completed_eofs = self.node_logger.recover_eof_done()
         self.completed_checkpoints = self.node_logger.recover_checkpoint_done()
+        self.clean_senders = self.node_logger.recover_cleans()
 
         signal.signal(signal.SIGTERM, self._handle_sigterm)
 
@@ -168,6 +169,9 @@ class WorkerBase(HealthCheckServer):
         pass
 
     def on_eof_complete(self, client_id=None):
+        pass
+
+    def on_clean_client_data(self, client_id=None):
         pass
 
     def _routing_key(self, msg: dict) -> str:
@@ -355,6 +359,51 @@ class WorkerBase(HealthCheckServer):
         self._mark_eof_done(client_id)
         self.on_eof_complete(client_id)
 
+    def _purge_client_state(self, client_id: str):
+        client_id = str(client_id)
+        logger.info(f"[{self.__class__.__name__}] Ejecutando limpieza completa para {client_id}")
+
+        # Clean data from RAM
+        keys_to_delete = []
+        for buf_key, msgs in self._buffer.items():
+            self._buffer[buf_key] = [
+                m for m in msgs 
+                if str(self._outbox_client_id(m)) != client_id
+            ]
+            if not self._buffer[buf_key]:
+                keys_to_delete.append(buf_key)
+                
+        for k in keys_to_delete:
+            del self._buffer[k]
+
+        if client_id in self.eof_client_senders:
+            del self.eof_client_senders[client_id]
+
+        key_eof = self._eof_done_key(client_id)
+        if key_eof in self.completed_eofs:
+            self.completed_eofs.remove(key_eof)
+
+        chk_keys = [k for k in self.completed_checkpoints if k.startswith(f"{client_id}:")]
+        for k in chk_keys:
+            self.completed_checkpoints.remove(k)
+
+        # Clean state data in subclasses
+        self.on_clean_client_data(client_id)
+
+        # Clear data from disk
+        self.node_logger.clear_all_data_for_client(client_id)
+
+        # Send downstream
+        if self._producer is not None:
+            self._emit_control({
+                "type": "clean",
+                "client_id": client_id,
+                "_worker_node_id": f"{self.consumer_group}_{self.shard_id}"
+            })
+
+        # Clear state of clean
+        self.node_logger.clear_clean_state(client_id)
+
     # --- Loop principal ---------------------------------------------------------
 
     def run(self):
@@ -367,6 +416,7 @@ class WorkerBase(HealthCheckServer):
         
         checkpoint_senders = {}
 
+        # Recover EOFs
         for client_id, senders in list(eof_client_senders.items()):
             if len(senders) >= self.n_upstream and not self._eof_is_done(client_id):
                 logger.info(f"{self.__class__.__name__} recupero EOF completo para client_id={client_id}; ejecutando cierre pendiente")
@@ -374,6 +424,13 @@ class WorkerBase(HealthCheckServer):
                 done_clients.add(client_id)
                 if client_id in eof_client_senders:
                     del eof_client_senders[client_id]
+
+        # Recover clean commands
+        for client_id, senders in list(self.clean_senders.items()):
+            if len(senders) >= self.n_upstream:
+                logger.info(f"[{self.__class__.__name__}] Recupero CLEAN completo para {client_id}; retomando limpieza interrumpida")
+                self._purge_client_state(client_id)
+                del self.clean_senders[client_id]
 
         def on_message(body: bytes, ack, nack):
             try:
@@ -468,11 +525,34 @@ class WorkerBase(HealthCheckServer):
                     ack()
                     return
 
+                elif msg.get("type") == "clean":
+                    client_id = msg.get("client_id")
+                    
+                    if client_id is not None:
+                        client_id = str(client_id)
+                        self.clean_senders.setdefault(client_id, set())
+                        
+                        if sender_id not in self.clean_senders[client_id]:
+                            self.node_logger.log_clean(client_id, sender_id)
+                            self.clean_senders[client_id].add(sender_id)
+                            
+                            current_clean = len(self.clean_senders[client_id])
+                            logger.info(f"Comando de limpieza recibido para {client_id} de {sender_id} ({current_clean}/{self.n_upstream})")
+
+                            if current_clean >= self.n_upstream:
+                                self._purge_client_state(client_id)
+                                del self.clean_senders[client_id]
+                                logger.info(f"Limpieza finalizada para cliente {client_id}")
+
+                    ack()
+                    return
+
                 is_resuming = self.supports_partial_batch_resume() and (msg_hash == self.pending_batch_id)
                 rows = msg.get("rows", [])
 
                 if not is_resuming:
-                    self.node_logger.save_batch_state(msg_hash, 0, self.last_completed_batch)
+                    current_sizes = {k: len(v) for k, v in self._buffer.items()}
+                    self.node_logger.save_batch_state(msg_hash, 0, self.last_completed_batch, current_sizes)
                     self.pending_batch_id = msg_hash
                     self.processed_tx_count = 0
 

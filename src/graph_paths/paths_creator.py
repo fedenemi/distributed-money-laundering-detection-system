@@ -170,6 +170,26 @@ class PathsCreator(WorkerBase):
         )
         return str(zlib.crc32(key.encode('utf-8')) % self.output_shards)
 
+    def on_clean_client_data(self, client_id=None):
+        if client_id is None:
+            return
+            
+        client_key = str(client_id)
+        state_changed = False
+
+        if client_key in self.incoming_edges:
+            del self.incoming_edges[client_key]
+            state_changed = True
+            
+        if client_key in self.outgoing_edges:
+            del self.outgoing_edges[client_key]
+            state_changed = True
+
+        if state_changed:
+            self._persist_state()
+            
+        logging.info(f"Limpieza completa para cliente {client_key}")
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     paths_creator = PathsCreator()

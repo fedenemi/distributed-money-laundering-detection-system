@@ -115,6 +115,16 @@ class PathsAggregator(WorkerBase):
             f"pairs={len(pair_counts)} max_paths_for_pair={max_paths} "
             f"qualified_pairs={qualified_pairs} emitted_accounts={len(unique_accounts)}"
         )
+    
+    def on_clean_client_data(self, client_id=None):
+        if client_id is None:
+            return
+            
+        client_key = str(client_id)
+        if client_key in self.total_pair_counts:
+            del self.total_pair_counts[client_key]
+            self._persist_state()
+            logging.info(f"Limpieza completa para cliente {client_key}")
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

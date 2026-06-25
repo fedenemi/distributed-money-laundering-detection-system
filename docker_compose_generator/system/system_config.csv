@@ -1,5 +1,5 @@
 prefix,total_instances
-usd_filter,2
+usd_filter,3
 q1_data_reducer,3
 q1_filter_lt_50,2
 q2_splitter_by_bank,3
@@ -21,7 +21,7 @@ q4_splitters_by_origin_and_dest_out,3
 q4_out_edges_filter,4
 q4_paths_creators,4
 q4_paths_aggregator,1
-q5_data_reducer,2
+q5_data_reducer,3
 q5_filter_01092022_05092022,3
 q5_money_converter,3
 q5_money_converter_api_client,3

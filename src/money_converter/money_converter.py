@@ -294,6 +294,39 @@ class MoneyConverter(WorkerBaseDoubleIO):
                 self._sec_pending_rows_to_mark.append(row_id)
 
         return ([], new_data_list)
+    
+    def on_clean_client_data(self, client_id=None):
+        if client_id is None:
+            return
+            
+        client_key = str(client_id)
+        state_changed = False
+
+        if hasattr(self, "_shared_lock"):
+            with self._shared_lock:
+                for rate_key in list(self._shared_pending.keys()):
+                    rows_by_id = self._normalize_pending(self._shared_pending[rate_key])
+
+                    keys_to_delete = [
+                        row_id for row_id, row_data in rows_by_id.items()
+                        if str(row_data.get("client_id", "")) == client_key
+                    ]
+
+                    if keys_to_delete:
+                        for k in keys_to_delete:
+                            del rows_by_id[k]
+
+                        if not rows_by_id:
+                            del self._shared_pending[rate_key]
+                        else:
+                            self._shared_pending[rate_key] = rows_by_id
+                            
+                        state_changed = True
+
+        if state_changed:
+            self._save_persistent_state()
+            
+        logging.info(f"Limpieza completa para {client_key}")
 
 if __name__ == "__main__":
     logger = logging.getLogger(__file__)
