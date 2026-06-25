@@ -107,6 +107,19 @@ class IncomingEdgesFilter(WorkerBase):
     def _routing_key(self, msg: dict) -> str:
         key = f"{msg['From Bank']}{msg['Account']}"
         return str(zlib.crc32(key.encode('utf-8')) % self.output_shards)
+    
+    def on_clean_client_data(self, client_id=None):
+        if client_id is None:
+            return
+            
+        client_key = str(client_id)
+
+        if client_key in self._clients_files_by_id:
+            disk_set = self._clients_files_by_id[client_key]
+            disk_set.cleanup()
+            del self._clients_files_by_id[client_key]
+
+            logging.info(f"Limpieza completa para cliente {client_key}")
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
