@@ -550,7 +550,8 @@ class WorkerBase(HealthCheckServer):
                 rows = msg.get("rows", [])
 
                 if not is_resuming:
-                    self.node_logger.save_batch_state(msg_hash, 0, self.last_completed_batch)
+                    current_sizes = {k: len(v) for k, v in self._buffer.items()}
+                    self.node_logger.save_batch_state(msg_hash, 0, self.last_completed_batch, current_sizes)
                     self.pending_batch_id = msg_hash
                     self.processed_tx_count = 0
 

@@ -872,7 +872,10 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                     rows = msg.get("rows", [])
 
                     if not is_resuming:
-                        self.node_logger.save_batch_state(msg_hash, 0, self.last_completed_batch)
+                        current_sizes = {}
+                        for k, v in self._main_out_buffer.items(): current_sizes[f"out_main_{k}"] = len(v)
+                        for k, v in self._sec_out_buffer.items(): current_sizes[f"out_sec_{k}"] = len(v)
+                        self.node_logger.save_batch_state(msg_hash, 0, self.last_completed_batch, current_sizes)
                         self.pending_batch_id = msg_hash
                         self.processed_tx_count = 0
 
@@ -1111,7 +1114,10 @@ class WorkerBaseDoubleIO(HealthCheckServer):
                     rows = msg.get("rows", [])
 
                     if not is_resuming:
-                        self.node_logger.save_batch_state(msg_hash, 0, self.last_completed_batch)
+                        current_sizes = {}
+                        for k, v in self._main_out_buffer.items(): current_sizes[f"out_main_{k}"] = len(v)
+                        for k, v in self._sec_out_buffer.items(): current_sizes[f"out_sec_{k}"] = len(v)
+                        self.node_logger.save_batch_state(msg_hash, 0, self.last_completed_batch, current_sizes)
                         self.pending_batch_id = msg_hash
                         self.processed_tx_count = 0
 
