@@ -1,69 +1,76 @@
 # money-laundering-analysis-tp
-Sistema distribuido multicliente, escalable y tolerante a fallas que analiza la información de transacciones bancarias para detectar lavado de activos.
 
-## Protocolo de comunicacion (cliente-gateway)
+A fault-tolerant, scalable, multi-client distributed system that analyzes banking transaction data to detect money laundering patterns. Built as part of the Distributed Systems course (75.74) at UBA FIUBA.
 
-El cliente y el gateway se comunican por TCP. Todos los mensajes empiezan con
-un `msg_type` serializado como `uint32` big-endian. Los strings se serializan
-como `uint32 length` + bytes UTF-8.
+The system ingests ~170 million banking transactions from the IBM AML dataset and runs five analytical queries in parallel across a pipeline of ~80 containerized workers coordinated via RabbitMQ. It is designed to survive arbitrary process crashes mid-execution: each worker persists its state to disk and recovers automatically after being restarted by a distributed monitor. The monitoring subsystem itself uses the Chang-Roberts ring election algorithm to tolerate monitor failures without a single point of failure.
 
-Tipos de mensaje:
+**Key technical highlights:**
+- Distributed pipeline across 80+ Docker containers orchestrated with docker-compose
+- RabbitMQ-based message passing with at-least-once delivery and idempotent deduplication
+- Crash recovery via disk persistence (atomic writes with CRC32 checksums) and RabbitMQ requeue
+- Leaderless fault detection using Chang-Roberts ring election across 3 monitor nodes
+- Chaos Monkey testing to validate fault tolerance under arbitrary SIGKILL events
 
-- `TRANSACTIONS_BATCH` (`1`): `client_id` + payload CSV de transacciones.
-- `ACCOUNTS_BATCH` (`2`): `client_id` + payload CSV de cuentas.
+---
+
+## Client-gateway communication protocol
+
+The client and gateway communicate over TCP. All messages start with a `msg_type` serialized as a `uint32` big-endian. Strings are serialized as `uint32 length` + UTF-8 bytes.
+
+Message types:
+
+- `TRANSACTIONS_BATCH` (`1`): `client_id` + CSV payload of transactions.
+- `ACCOUNTS_BATCH` (`2`): `client_id` + CSV payload of accounts.
 - `END_TRANSACTIONS` (`3`): `client_id`.
 - `END_ACCOUNTS` (`4`): `client_id`.
-- `QUERY_RESULT_BATCH` (`5`): `client_id` + `query_id` + payload CSV de resultados.
+- `QUERY_RESULT_BATCH` (`5`): `client_id` + `query_id` + CSV payload of results.
 - `END_QUERY` (`6`): `client_id` + `query_id`.
 - `END_RESULTS` (`7`): `client_id`.
 - `ACK` (`8`): `client_id`.
 
-### Batches CSV
+### CSV batches
 
-`TRANSACTIONS_BATCH`, `ACCOUNTS_BATCH` y `QUERY_RESULT_BATCH` usan un unico
-payload CSV por batch:
+`TRANSACTIONS_BATCH`, `ACCOUNTS_BATCH` and `QUERY_RESULT_BATCH` use a single CSV payload per batch:
 
 ```
 uint32 msg_type
 string client_id
-uint32 query_id      # solo para QUERY_RESULT_BATCH
+uint32 query_id      # only for QUERY_RESULT_BATCH
 uint32 payload_size
 bytes csv_payload
 ```
 
-El payload CSV no incluye header. Para transacciones, el cliente proyecta y
-envia solo las columnas que usa el sistema:
+The CSV payload does not include a header. For transactions, the client projects and sends only the columns used by the system:
 
 ```
 Timestamp, From Bank, Account, To Bank, Account.1,
 Amount Paid, Payment Currency, Payment Format
 ```
 
-Este formato evita serializar cada celda por separado y reduce el costo de CPU del cliente y del gateway al procesar datasets grandes.
+This format avoids serializing each cell individually and reduces CPU overhead on both the client and the gateway when processing large datasets.
 
+Expected flow:
 
-Flujo esperado:
+1) Client sends `ACCOUNTS_BATCH` in batches, then `END_ACCOUNTS`.
+2) Client sends `TRANSACTIONS_BATCH` in batches, then `END_TRANSACTIONS`.
+3) Server responds with multiple `QUERY_RESULT_BATCH` messages interleaved across the 5 queries.
+4) Server sends `END_QUERY` for each query and finally `END_RESULTS`.
+5) Client responds `ACK` (with `client_id`) for each message received.
+6) Server responds `ACK` (with `client_id`) for each message received.
 
-1) Cliente envia `ACCOUNTS_BATCH` en batches y luego `END_ACCOUNTS`.
-2) Cliente envia `TRANSACTIONS_BATCH` en batches y luego `END_TRANSACTIONS`.
-3) Servidor responde con multiples `QUERY_RESULT_BATCH` intercalados para las 5 consultas.
-4) Servidor envia `END_QUERY` por cada consulta y finalmente `END_RESULTS`.
-5) Cliente responde `ACK` (con `client_id`) por cada mensaje recibido.
-6) Servidor responde `ACK` (con `client_id`) por cada mensaje recibido.
+All messages include `client_id` to validate routing errors.
 
-Todos los mensajes incluyen `client_id` para validar errores de ruteo.
+## Dataset sampling script
 
-## Script de muestreo de datasets
+The [scripts/reduce_dataset.py](scripts/reduce_dataset.py) script allows reducing any CSV with a header using random sampling. It does not load the entire file into memory.
 
-El script [scripts/reduce_dataset.py](scripts/reduce_dataset.py) permite reducir cualquier CSV con header usando muestreo aleatorio. No carga todo el archivo en memoria.
-
-Uso:
+Usage:
 
 ```bash
 python scripts/reduce_dataset.py --input datasets/transactions_full.csv --output datasets/transactions_reduced.csv --size 100000
 ```
 
-Opcionalmente, podes fijar una semilla para resultados reproducibles:
+Optionally, you can fix a seed for reproducible results:
 
 ```bash
 python scripts/reduce_dataset.py --input datasets/transactions_full.csv --output datasets/transactions_reduced.csv --size 100000 --seed 123
@@ -71,59 +78,59 @@ python scripts/reduce_dataset.py --input datasets/transactions_full.csv --output
 
 ## Chaos monkey
 
-El script [scripts/chaos_monkey.py](scripts/chaos_monkey.py) permite interrumpir servicios de `docker compose` para probar tolerancia a fallos. La configuracion vive en [scripts/chaos_monkey.yaml](scripts/chaos_monkey.yaml).
+The [scripts/chaos_monkey.py](scripts/chaos_monkey.py) script allows interrupting docker-compose services to test fault tolerance. Configuration lives in [scripts/chaos_monkey.yaml](scripts/chaos_monkey.yaml).
 
-Primero conviene validar que la configuracion selecciona los servicios esperados:
+First, validate that the configuration selects the expected services:
 
 ```bash
 python scripts/chaos_monkey.py --dry-run --once
 ```
 
-Para ejecutarlo continuamente mientras el sistema esta levantado:
+To run it continuously while the system is up:
 
 ```bash
 python scripts/chaos_monkey.py
 ```
 
-Tambien se puede limitar a un solo evento real:
+To limit it to a single real event:
 
 ```bash
 python scripts/chaos_monkey.py --once
 ```
 
-Para probar un nodo puntual sin modificar el YAML:
+To test a specific node without modifying the YAML:
 
 ```bash
 python scripts/chaos_monkey.py --once --service q2_banks_name_adder_0
 ```
 
-Tambien se puede elegir por regex:
+You can also select by regex:
 
 ```bash
 python scripts/chaos_monkey.py --once --pattern '^q3_avg_and_transactions_joiner_0$'
 ```
 
-La configuracion permite definir:
+The configuration allows defining:
 
-- `allowed_services`: servicios exactos que pueden ser detenidos.
-- `allowed_patterns`: patrones regex de servicios permitidos.
-- `exclude_services` y `exclude_patterns`: servicios que nunca se deben tocar.
-- `action`: `restart`, `stop`, `kill`, `stop_start` o `kill_start`.
-- `interval_seconds`: rango de espera entre fallos.
-- `downtime_seconds`: rango de tiempo que un servicio queda detenido.
-- `max_events`: cantidad maxima de eventos antes de terminar.
+- `allowed_services`: exact services that may be stopped.
+- `allowed_patterns`: regex patterns of allowed services.
+- `exclude_services` and `exclude_patterns`: services that should never be touched.
+- `action`: `restart`, `stop`, `kill`, `stop_start` or `kill_start`.
+- `interval_seconds`: wait range between failures.
+- `downtime_seconds`: range of time a service stays stopped.
+- `max_events`: maximum number of events before stopping.
 
-Por defecto no se interrumpen `rabbitmq`, `gateway`, `client_*` ni el cliente de API de Q5.
+By default, `rabbitmq`, `gateway`, `client_*` and the Q5 API client are never interrupted.
 
-## Resultados
+## Results
 
-Los resultados de cada cliente se escriben como CSV en:
+Results for each client are written as CSV files to:
 
 ```
 results/client_{id}/results_q{n}.csv
 ```
 
-Ejemplo:
+Example:
 
 ```
 results/client_0/results_q1.csv
